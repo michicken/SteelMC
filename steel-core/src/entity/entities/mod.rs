@@ -12,6 +12,7 @@ pub use objects::aquatic::{
     AxolotlEntity, CodEntity, PufferfishEntity, SalmonEntity, TadpoleEntity, TropicalFishEntity,
 };
 pub use objects::armor::ArmorStandEntity;
+pub use mobs::bosses::{EnderDragonEntity, EnderDragonPart};
 pub use objects::display_ui::{BlockDisplayEntity, ItemFrameEntity, LeashFenceKnotEntity};
 pub use objects::effects::AreaEffectCloudEntity;
 pub use objects::explosives::{EndCrystalEntity, PrimedTntEntity};
