@@ -430,6 +430,79 @@ mod tests {
     }
 
     #[test]
+    fn litematic_vertical_dropper_elevator_lifts_items_to_top_barrel() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("dropper_elevator");
+        let mut builder = LitematicBuilder::new("dropper_elevator", (2, 5, 1));
+        for y in 0..4 {
+            builder.set(
+                0,
+                y,
+                0,
+                "minecraft:dropper",
+                &[("facing", "up")],
+            );
+            builder.set(1, y, 0, "minecraft:redstone_block", &[]);
+        }
+        builder.set(0, 4, 0, "minecraft:barrel", &[("facing", "up")]);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_dropper_elevator");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        let origin = BlockPos::new(4, 12, 4);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+
+        set_slot(
+            &world,
+            origin,
+            0,
+            ItemStack::with_count(&vanilla_items::STONE, 8),
+        );
+
+        // Each rising edge moves one item one dropper up; then the next
+        // dropper can fire on the next edge, so N edges lift an item N levels.
+        for _ in 0..10 {
+            for y in 0..4 {
+                let power_pos = origin.offset(1, y, 0);
+                let dropper_pos = origin.offset(0, y, 0);
+                world.set_block(
+                    power_pos,
+                    vanilla_blocks::AIR.default_state(),
+                    steel_utils::types::UpdateFlags::UPDATE_CLIENTS
+                        | steel_utils::types::UpdateFlags::UPDATE_NEIGHBORS,
+                );
+                world.update_neighbors_at(power_pos, &vanilla_blocks::REDSTONE_BLOCK);
+                world.update_neighbors_at(dropper_pos, &vanilla_blocks::DROPPER);
+                tick_world(&world, 2);
+                world.run_block_events();
+
+                world.set_block(
+                    power_pos,
+                    vanilla_blocks::REDSTONE_BLOCK.default_state(),
+                    steel_utils::types::UpdateFlags::UPDATE_CLIENTS
+                        | steel_utils::types::UpdateFlags::UPDATE_NEIGHBORS,
+                );
+                world.update_neighbors_at(power_pos, &vanilla_blocks::REDSTONE_BLOCK);
+                world.update_neighbors_at(dropper_pos, &vanilla_blocks::DROPPER);
+                tick_world(&world, 2);
+                world.run_block_events();
+            }
+        }
+
+        let top = count_at(&world, origin.offset(0, 4, 0), 0);
+        assert!(
+            top > 0,
+            "vertical dropper elevator must deliver stone to the top barrel, top={top}"
+        );
+    }
+
+    #[test]
     fn litematic_long_hopper_chain_feeds_bottom_barrel() {
         steel_registry::init_vanilla_registry();
         crate::behavior::init_behaviors();
