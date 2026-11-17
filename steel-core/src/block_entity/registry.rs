@@ -203,6 +203,11 @@ pub fn init_block_entities() {
             Arc::new(BarrelBlockEntity::new(level, pos, state))
         });
 
+        // Register hopper block entity factory
+        registry.register(&vanilla_block_entity_types::HOPPER, |level, pos, state| {
+            Arc::new(HopperBlockEntity::new(level, pos, state))
+        });
+
         registry.register(&vanilla_block_entity_types::BEACON, |level, pos, state| {
             Arc::new(BeaconBlockEntity::new(level, pos, state))
         });
