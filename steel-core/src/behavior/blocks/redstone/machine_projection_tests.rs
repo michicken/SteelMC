@@ -387,6 +387,40 @@ mod tests {
     }
 
     #[test]
+    fn litematic_cobblestone_generator_forms_cobblestone_from_flowing_lava() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("cobblestone_generator");
+        let mut builder = LitematicBuilder::new("cobblestone_generator", (2, 2, 1));
+        for x in 0..2 {
+            builder.set(x, 0, 0, "minecraft:stone", &[]);
+        }
+        builder.set(0, 1, 0, "minecraft:lava", &[("level", "1")]);
+        builder.set(1, 1, 0, "minecraft:water", &[]);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_cobblestone_generator");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        let origin = BlockPos::new(4, 3, 4);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+
+        world.update_neighbors_at(origin.offset(0, 1, 0), &vanilla_blocks::LAVA);
+        tick_world(&world, 20);
+        world.run_block_events();
+
+        assert_eq!(
+            block_id(world.get_block_state(origin.offset(0, 1, 0))),
+            Identifier::new_static("minecraft", "cobblestone"),
+            "flowing lava touching water must turn into cobblestone"
+        );
+    }
+
+    #[test]
     fn litematic_two_by_two_sticky_piston_door_moves_and_returns() {
         steel_registry::init_vanilla_registry();
         crate::behavior::init_behaviors();
