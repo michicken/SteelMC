@@ -19,7 +19,7 @@ use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{BlockStateProperties, BoolProperty, Direction, EnumProperty};
 use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_block_entity_types;
-use steel_registry::vanilla_entities;
+use steel_registry::{vanilla_entities, vanilla_items};
 use steel_utils::{BlockPos, BlockStateId, Downcast as _, types::UpdateFlags};
 
 use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
@@ -134,6 +134,28 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
     let Some((slot, stack)) = picked else {
         return;
     };
+
+    if !dropper && stack.item == &*vanilla_items::BONE_MEAL {
+        // Vanilla consumes one bonemeal per activation when the facing block is
+        // bonemealable, and falls back to ejecting the stack otherwise.
+        drop(guard);
+        if crate::behavior::items::BoneMealItem::grow(world, pos.relative(facing)) {
+            if let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) {
+                let remaining = stack.count() - 1;
+                if remaining > 0 {
+                    guard.set_item(own_id, slot, stack.copy_with_count(remaining));
+                } else {
+                    guard.remove_item(own_id, slot, stack.count());
+                }
+            }
+            return;
+        }
+        if let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) {
+            guard.remove_item(own_id, slot, stack.count());
+        }
+        eject_item(world, pos, facing, stack);
+        return;
+    }
 
     if let Some(target) = &target {
         let leftover = insert_stack(&mut guard, target.container_id(), stack.clone());
@@ -433,6 +455,98 @@ mod tests {
         );
 
         assert!(!fixture.world.get_block_state(DISPENSER_POS).get_value(TRIGGERED));
+    }
+
+    #[test]
+    fn hopper_feeds_dropper_pipeline() {
+        use steel_registry::blocks::properties::BlockStateProperties as Props;
+
+        let fixture = fixture("hopper_dropper_pipeline");
+        let hopper_pos = BlockPos::new(0, 1, 0);
+        let source_pos = BlockPos::new(0, 2, 0);
+        let power_pos = BlockPos::new(1, 0, 0);
+        let hopper_state = vanilla_blocks::HOPPER
+            .default_state()
+            .set_value(&Props::FACING_HOPPER, Direction::Down);
+        assert!(fixture.world.set_block(
+            hopper_pos,
+            hopper_state,
+            UpdateFlags::UPDATE_NONE
+        ));
+        assert!(fixture.world.set_block(
+            source_pos,
+            vanilla_blocks::BARREL.default_state(),
+            UpdateFlags::UPDATE_NONE
+        ));
+        assert!(fixture.world.set_block(
+            DISPENSER_POS,
+            facing_down(&vanilla_blocks::DROPPER),
+            UpdateFlags::UPDATE_NONE
+        ));
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::BARREL.default_state(),
+            UpdateFlags::UPDATE_NONE
+        ));
+        assert!(fixture.world.set_block(
+            power_pos,
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            UpdateFlags::UPDATE_NONE
+        ));
+        set_slot(
+            &fixture.world,
+            source_pos,
+            0,
+            ItemStack::with_count(&vanilla_items::STONE, 4),
+        );
+
+        let hopper_entity = fixture.world.get_block_entity(hopper_pos).expect("hopper");
+        for _ in 0..16 {
+            hopper_entity.tick(&fixture.world);
+        }
+
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 1);
+        assert_eq!(count_at(&fixture.world, BELOW_POS, 0), 0);
+
+        DropperBlock::new(&vanilla_blocks::DROPPER).tick(
+            fixture.world.get_block_state(DISPENSER_POS),
+            &fixture.world,
+            DISPENSER_POS,
+        );
+
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
+        assert_eq!(count_at(&fixture.world, BELOW_POS, 0), 1);
+    }
+
+    #[test]
+    fn dispenser_consumes_bonemeal_on_a_bonemealable_block() {
+        let fixture = fixture("dispenser_bonemeal");
+        let east = vanilla_blocks::DISPENSER
+            .default_state()
+            .set_value(FACING, Direction::East)
+            .set_value(TRIGGERED, false);
+        let target_pos = BlockPos::new(1, 0, 0);
+        assert!(fixture.world.set_block(
+            target_pos,
+            vanilla_blocks::ROOTED_DIRT.default_state(),
+            UpdateFlags::UPDATE_NONE
+        ));
+        assert!(fixture.world.set_block(
+            POWER_POS,
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            UpdateFlags::UPDATE_NONE
+        ));
+        assert!(fixture.world.set_block(DISPENSER_POS, east, UpdateFlags::UPDATE_NONE));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::with_count(&vanilla_items::BONE_MEAL, 3),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(east, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 2);
     }
 
     #[test]

@@ -33,7 +33,7 @@ impl BoneMealItem {
         }
     }
 
-    fn grow(world: &Arc<World>, pos: BlockPos) -> bool {
+    pub(crate) fn grow(world: &Arc<World>, pos: BlockPos) -> bool {
         let state = world.get_block_state(pos);
         let Some(behavior) = BLOCK_BEHAVIORS.get_behavior_for_state(state) else {
             return false;

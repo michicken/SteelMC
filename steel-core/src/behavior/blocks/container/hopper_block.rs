@@ -172,15 +172,17 @@ mod tests {
 mod integration_tests {
     use std::sync::Arc;
 
+    use glam::DVec3;
     use steel_registry::{
         blocks::block_state_ext::BlockStateExt as _, init_vanilla_registry,
-        item_stack::ItemStack, vanilla_blocks, vanilla_items,
+        item_stack::ItemStack, vanilla_blocks, vanilla_entities, vanilla_items,
     };
     use steel_utils::{BlockPos, ChunkPos, Downcast as _, types::UpdateFlags};
 
     use super::{ENABLED, FACING};
     use crate::behavior::init_behaviors;
     use crate::block_entity::{entities::HopperBlockEntity, init_block_entities};
+    use crate::entity::{entities::ItemEntity, next_entity_id};
     use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
     use crate::test_support::{TestWorld, fresh_test_world, insert_ready_full_chunk};
     use crate::world::World;
@@ -309,6 +311,28 @@ mod integration_tests {
             behavior.get_analog_output_signal(state, &fixture.world, HOPPER_POS, Direction::Down)
                 > 0
         );
+    }
+
+    #[test]
+    fn hopper_sucks_item_entities_from_above() {
+        let fixture = fixture("hopper_suck");
+        assert!(fixture.world.set_block(
+            HOPPER_POS,
+            vanilla_blocks::HOPPER.default_state(),
+            UpdateFlags::UPDATE_NONE
+        ));
+
+        let item = Arc::new(ItemEntity::with_item(
+            &vanilla_entities::ITEM,
+            next_entity_id(),
+            DVec3::new(0.5, 1.2, 0.5),
+            ItemStack::with_count(&vanilla_items::STONE, 3),
+            Arc::downgrade(&fixture.world),
+        ));
+        fixture.world.try_add_entity(item).expect("spawn item entity");
+
+        tick_hopper(&fixture.world, 1);
+        assert_eq!(count_at(&fixture.world, HOPPER_POS, 0), 3);
     }
 
     #[test]

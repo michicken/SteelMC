@@ -12,15 +12,16 @@
 
 use std::sync::{Arc, Weak};
 
+use glam::DVec3;
 use simdnbt::borrow::BaseNbtCompound as BorrowedNbtCompound;
 use simdnbt::borrow::NbtCompound as NbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{BlockStateProperties, BoolProperty};
-use steel_registry::vanilla_block_entity_types;
+use steel_registry::{vanilla_block_entity_types, vanilla_entities};
 use steel_utils::{
-    BlockPos, BlockStateId, DowncastType, DowncastTypeKey, locks::SyncMutex, nbt::NbtValueInput as _,
-    translations,
+    BlockPos, BlockStateId, Downcast as _, DowncastType, DowncastTypeKey, WorldAabb,
+    locks::SyncMutex, nbt::NbtValueInput as _, translations,
 };
 use text_components::TextComponent;
 
@@ -30,9 +31,10 @@ use crate::{
         container_properties::ContainerProperties,
         randomizable_container::RandomizableContainerStorage,
     },
+    entity::{Entity as _, RemovalReason, entities::ItemEntity},
     inventory::{
         lock::{ContainerLockGuard, ContainerRef},
-        transfer::move_one_item,
+        transfer::{insert_stack, move_one_item},
     },
     nameable::Nameable,
     world::World,
@@ -87,6 +89,14 @@ impl HopperBlockEntity {
         if self.base().is_removed() {
             return;
         }
+        let state = self.get_block_state();
+        if !state.get_value(ENABLED) {
+            return;
+        }
+        // Vanilla hoppers suck items resting above them every tick, independent of
+        // the container-to-container transfer cooldown.
+        self.suck_item_entities(world);
+
         let mut cooldown = self.cooldown.lock();
         if *cooldown > 0 {
             *cooldown -= 1;
@@ -96,10 +106,6 @@ impl HopperBlockEntity {
                 return;
             }
         }
-        let state = self.get_block_state();
-        if !state.get_value(ENABLED) {
-            return;
-        }
         *cooldown = MOVE_ITEM_SPEED;
         drop(cooldown);
 
@@ -107,6 +113,46 @@ impl HopperBlockEntity {
         self.push_one(world, facing);
         if facing != steel_registry::blocks::properties::Direction::Up {
             self.pull_one(world);
+        }
+    }
+
+    /// Pulls item entities resting in the Vanilla suction area above the hopper.
+    ///
+    /// The area is `(0.0, 0.6875, 0.0)..(1.0, 2.0, 1.0)` relative to the hopper, matching
+    /// Vanilla's `HopperBlockEntity.SUCK_AREA`.
+    fn suck_item_entities(&self, world: &Arc<World>) {
+        let pos = self.get_block_pos();
+        let center = DVec3::new(
+            f64::from(pos.x()) + 0.5,
+            f64::from(pos.y()) + 1.343_75,
+            f64::from(pos.z()) + 0.5,
+        );
+        let area = WorldAabb::of_size(center, 1.0, 1.312_5, 1.0);
+        let items = world.get_entities_in_aabb_matching(&area, |entity| {
+            entity.entity_type() == &vanilla_entities::ITEM
+        });
+        for entity in items {
+            let Some(item_entity) = entity.downcast_ref::<ItemEntity>() else {
+                continue;
+            };
+            let stack = item_entity.get_item();
+            if stack.is_empty() {
+                continue;
+            }
+            let own = self.storage.container_ref.clone();
+            let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) else {
+                continue;
+            };
+            let leftover = insert_stack(&mut guard, own.container_id(), stack.clone());
+            drop(guard);
+            if leftover.count() == stack.count() {
+                continue;
+            }
+            if leftover.is_empty() {
+                item_entity.set_removed(RemovalReason::Discarded);
+            } else {
+                item_entity.set_item(leftover);
+            }
         }
     }
 

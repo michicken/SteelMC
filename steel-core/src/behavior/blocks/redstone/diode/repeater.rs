@@ -28,6 +28,7 @@ pub struct RepeaterBlock {
 }
 
 const DELAY: &IntProperty = &BlockStateProperties::DELAY;
+const POWERED: &BoolProperty = &BlockStateProperties::POWERED;
 const HORIZONTAL_FACING: &EnumProperty<Direction> = &BlockStateProperties::HORIZONTAL_FACING;
 const LOCKED: &BoolProperty = &BlockStateProperties::LOCKED;
 
@@ -137,6 +138,7 @@ impl BlockBehavior for RepeaterBlock {
     }
 
     fn tick(&self, state: BlockStateId, world: &Arc<World>, pos: BlockPos) {
+        let powered_before = state.get_value(POWERED);
         self.diode.tick(
             state,
             world,
@@ -145,6 +147,12 @@ impl BlockBehavior for RepeaterBlock {
             Self::should_turn_on(world.as_ref(), pos, state),
             Self::delay(state),
         );
+        // Vanilla repeaters notify the block they face whenever their output
+        // edge changes; without this, lamps/pistons never see the new signal.
+        let new_state = world.get_block_state(pos);
+        if new_state.get_value(POWERED) != powered_before {
+            self.diode.update_neighbors_in_front(world, pos, new_state);
+        }
     }
 
     fn set_placed_by(

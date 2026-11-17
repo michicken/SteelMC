@@ -4,6 +4,8 @@ mod copper_bulb_block;
 mod daylight_detector_block;
 mod diode;
 mod java_hash;
+#[cfg(test)]
+mod machine_projection_tests;
 mod lever_block;
 mod lightning_rod_block;
 mod note_block;
