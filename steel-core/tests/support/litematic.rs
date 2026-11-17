@@ -37,6 +37,14 @@ use steel_worldgen::state_resolver::WorldgenStateResolver;
 
 use crate::world::World;
 
+/// A tile-entity payload carried by the projection (chest contents, sign text, ...).
+#[derive(Debug, Clone)]
+pub(crate) struct LitematicTileEntity {
+    /// Region-local block position (`x,y,z`).
+    pub(crate) pos: [i32; 3],
+    pub(crate) nbt: NbtCompound,
+}
+
 /// One region of a litematic projection, decoded into registry block states.
 #[derive(Debug)]
 pub(crate) struct LitematicRegion {
@@ -47,6 +55,8 @@ pub(crate) struct LitematicRegion {
     pub(crate) palette: Vec<BlockStateId>,
     /// Palette index per block, indexed by `x + z * size_x + y * size_x * size_z`.
     indices: Vec<usize>,
+    /// Block-entity payloads saved alongside the blocks.
+    pub(crate) tile_entities: Vec<LitematicTileEntity>,
 }
 
 impl LitematicRegion {
@@ -227,12 +237,29 @@ fn parse_region(
         ));
     }
 
+    let mut tile_entities = Vec::new();
+    if let Some(entries) = region.list("TileEntities").and_then(|list| list.compounds()) {
+        for entry in entries.clone() {
+            let pos = entry
+                .int_array("pos")
+                .ok_or_else(|| format!("region {name} tile entity missing pos int array"))?;
+            if pos.len() != 3 {
+                return Err(format!("region {name} tile entity pos must have 3 entries"));
+            }
+            tile_entities.push(LitematicTileEntity {
+                pos: [pos[0], pos[1], pos[2]],
+                nbt: entry.to_owned(),
+            });
+        }
+    }
+
     Ok(LitematicRegion {
         name,
         position,
         size,
         palette,
         indices,
+        tile_entities,
     })
 }
 
@@ -291,30 +318,32 @@ fn pack_indices(indices: &[usize], bits: u32) -> Vec<i64> {
 }
 
 /// Builds a single-region litematic fixture and writes it to disk.
-pub(crate) struct LitematicBuilder {
+struct BuilderRegion {
     name: String,
+    position: [i32; 3],
     size: [i32; 3],
     palette: Vec<(String, Vec<(String, String)>)>,
     indices: Vec<usize>,
+    tile_entities: Vec<([i32; 3], NbtCompound)>,
 }
 
-impl LitematicBuilder {
-    /// Creates an all-air region of `size` blocks.
-    #[must_use]
-    pub(crate) fn new(name: &str, size: (i32, i32, i32)) -> Self {
-        let palette = vec![("minecraft:air".to_owned(), Vec::new())];
+impl BuilderRegion {
+    fn new(name: &str, position: [i32; 3], size: (i32, i32, i32)) -> Self {
         Self {
             name: name.to_owned(),
+            position,
             size: [size.0, size.1, size.2],
-            palette,
+            palette: vec![("minecraft:air".to_owned(), Vec::new())],
             indices: vec![0; size.0 as usize * size.1 as usize * size.2 as usize],
+            tile_entities: Vec::new(),
         }
     }
 
     fn linear_index(&self, x: i32, y: i32, z: i32) -> usize {
         assert!(
             x >= 0 && y >= 0 && z >= 0 && x < self.size[0] && y < self.size[1] && z < self.size[2],
-            "litematic fixture position ({x},{y},{z}) outside {:?}",
+            "litematic region {} position ({x},{y},{z}) outside {:?}",
+            self.name,
             self.size
         );
         x as usize
@@ -337,42 +366,23 @@ impl LitematicBuilder {
         self.palette.len() - 1
     }
 
-    /// Places a block, registering its palette entry on demand.
-    pub(crate) fn set(
-        &mut self,
-        x: i32,
-        y: i32,
-        z: i32,
-        name: &str,
-        properties: &[(&str, &str)],
-    ) -> &mut Self {
+    fn set(&mut self, x: i32, y: i32, z: i32, name: &str, properties: &[(&str, &str)]) {
         let palette_index = self.palette_index(name, properties);
         let index = self.linear_index(x, y, z);
         self.indices[index] = palette_index;
-        self
     }
 
-    /// Fills the whole region with one block.
-    pub(crate) fn fill(&mut self, name: &str, properties: &[(&str, &str)]) -> &mut Self {
+    fn fill(&mut self, name: &str, properties: &[(&str, &str)]) {
         let palette_index = self.palette_index(name, properties);
         self.indices.fill(palette_index);
-        self
     }
 
-    /// Serialises the fixture as gzip-compressed litematic NBT.
-    pub(crate) fn write(&self, path: &Path) -> Result<(), String> {
-        let mut root = NbtCompound::new();
-        root.insert("Version", 6i32);
-        root.insert("MinecraftDataVersion", 3953i32);
-        let mut metadata = NbtCompound::new();
-        metadata.insert("Name", self.name.clone());
-        root.insert("Metadata", metadata);
-
+    fn write(&self, regions: &mut NbtCompound) {
         let mut region = NbtCompound::new();
         let mut position = NbtCompound::new();
-        position.insert("x", 0i32);
-        position.insert("y", 0i32);
-        position.insert("z", 0i32);
+        position.insert("x", self.position[0]);
+        position.insert("y", self.position[1]);
+        position.insert("z", self.position[2]);
         region.insert("Position", position);
         let mut size = NbtCompound::new();
         size.insert("x", self.size[0]);
@@ -397,10 +407,119 @@ impl LitematicBuilder {
             "BlockStates",
             NbtTag::LongArray(pack_indices(&self.indices, bits)),
         );
-        region.insert("TileEntities", NbtList::Compound(Vec::new()));
+
+        let mut tile_entities = Vec::with_capacity(self.tile_entities.len());
+        for (pos, nbt) in &self.tile_entities {
+            let mut entry = nbt.clone();
+            entry.insert("pos", NbtTag::IntArray(pos.to_vec()));
+            tile_entities.push(entry);
+        }
+        region.insert("TileEntities", NbtList::Compound(tile_entities));
+        regions.insert(self.name.clone(), region);
+    }
+}
+
+/// Builds a litematic fixture (one or more regions) and writes it to disk.
+pub(crate) struct LitematicBuilder {
+    regions: Vec<BuilderRegion>,
+}
+
+impl LitematicBuilder {
+    /// Creates an all-air single-region structure of `size` blocks.
+    #[must_use]
+    pub(crate) fn new(name: &str, size: (i32, i32, i32)) -> Self {
+        Self {
+            regions: vec![BuilderRegion::new(name, [0, 0, 0], size)],
+        }
+    }
+
+    /// Creates a multi-region structure; each entry is `(name, position, size)`.
+    #[must_use]
+    pub(crate) fn new_multi(regions: &[(&str, [i32; 3], (i32, i32, i32))]) -> Self {
+        assert!(!regions.is_empty(), "a litematic needs at least one region");
+        Self {
+            regions: regions
+                .iter()
+                .map(|(name, position, size)| BuilderRegion::new(name, *position, *size))
+                .collect(),
+        }
+    }
+
+    /// Places a block in the first region, registering its palette entry on demand.
+    pub(crate) fn set(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        name: &str,
+        properties: &[(&str, &str)],
+    ) -> &mut Self {
+        self.regions[0].set(x, y, z, name, properties);
+        self
+    }
+
+    /// Places a block in a specific region.
+    pub(crate) fn set_in_region(
+        &mut self,
+        region: usize,
+        x: i32,
+        y: i32,
+        z: i32,
+        name: &str,
+        properties: &[(&str, &str)],
+    ) -> &mut Self {
+        self.regions[region].set(x, y, z, name, properties);
+        self
+    }
+
+    /// Fills the whole first region with one block.
+    pub(crate) fn fill(&mut self, name: &str, properties: &[(&str, &str)]) -> &mut Self {
+        self.regions[0].fill(name, properties);
+        self
+    }
+
+    /// Attaches a block-entity payload at a position in the first region.
+    pub(crate) fn set_tile_entity(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        nbt: NbtCompound,
+    ) -> &mut Self {
+        let index = self.regions[0].linear_index(x, y, z);
+        let _ = index;
+        self.regions[0].tile_entities.push(([x, y, z], nbt));
+        self
+    }
+
+    /// Attaches a block-entity payload at a position in a specific region.
+    pub(crate) fn set_tile_entity_in_region(
+        &mut self,
+        region: usize,
+        x: i32,
+        y: i32,
+        z: i32,
+        nbt: NbtCompound,
+    ) -> &mut Self {
+        let index = self.regions[region].linear_index(x, y, z);
+        let _ = index;
+        self.regions[region].tile_entities.push(([x, y, z], nbt));
+        self
+    }
+
+    /// Serialises the fixture as gzip-compressed litematic NBT.
+    pub(crate) fn write(&self, path: &Path) -> Result<(), String> {
+        let mut root = NbtCompound::new();
+        root.insert("Version", 6i32);
+        root.insert("MinecraftDataVersion", 3953i32);
+        let mut metadata = NbtCompound::new();
+        metadata.insert("Name", self.regions[0].name.clone());
+        root.insert("Metadata", metadata);
 
         let mut regions = NbtCompound::new();
-        regions.insert(self.name.clone(), region);
+        for region in &self.regions {
+            region.write(&mut regions);
+        }
         root.insert("Regions", regions);
 
         let mut nbt_bytes = Vec::new();
@@ -420,6 +539,8 @@ pub(crate) struct PasteReport {
     pub(crate) placed: usize,
     pub(crate) skipped_air: usize,
     pub(crate) failed_positions: Vec<BlockPos>,
+    pub(crate) tile_entities_loaded: usize,
+    pub(crate) failed_tile_entities: Vec<BlockPos>,
 }
 
 /// Paste every region of `litematic` into `world` at `origin`.
@@ -465,6 +586,27 @@ pub(crate) fn paste_litematic(
     }
     for (pos, block) in placed_positions {
         world.update_neighbors_at(pos, block);
+    }
+
+    // Tile entities are loaded after the block + neighbour passes so containers
+    // exist and a half-assembled machine never reads their contents.
+    for region in &litematic.regions {
+        for tile_entity in &region.tile_entities {
+            let pos = origin.offset(
+                region.position[0] + tile_entity.pos[0],
+                region.position[1] + tile_entity.pos[1],
+                region.position[2] + tile_entity.pos[2],
+            );
+            let Some(block_entity) = world.get_block_entity(pos) else {
+                report.failed_tile_entities.push(pos);
+                continue;
+            };
+            if block_entity.load_with_owned_components(&tile_entity.nbt).is_err() {
+                report.failed_tile_entities.push(pos);
+            } else {
+                report.tile_entities_loaded += 1;
+            }
+        }
     }
     report
 }

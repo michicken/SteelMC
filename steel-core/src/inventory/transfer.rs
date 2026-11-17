@@ -5,6 +5,8 @@
 
 use steel_registry::item_stack::ItemStack;
 
+use steel_registry::blocks::properties::Direction;
+
 use crate::inventory::{
     container::Container,
     lock::{ContainerId, ContainerLockGuard},
@@ -17,6 +19,20 @@ pub(crate) fn insert_one_item(
     guard: &mut ContainerLockGuard,
     dst: ContainerId,
     stack: &ItemStack,
+) -> bool {
+    insert_one_item_in_slots(guard, dst, stack, None)
+}
+
+/// Inserts a single item into `dst`, restricted to `slots` when provided.
+///
+/// Slot restrictions are the container's automation view (`getSlotsForFace`):
+/// a furnace exposes only its input slot from above, only its fuel slot from
+/// the sides, and only its result slot from below.
+pub(crate) fn insert_one_item_in_slots(
+    guard: &mut ContainerLockGuard,
+    dst: ContainerId,
+    stack: &ItemStack,
+    slots: Option<&[usize]>,
 ) -> bool {
     if stack.is_empty() {
         return false;
@@ -32,15 +48,22 @@ pub(crate) fn insert_one_item(
     if max <= 0 {
         return false;
     }
+    let slot_list: Vec<usize> = slots.map_or_else(|| (0..size).collect(), <[usize]>::to_vec);
 
-    for slot in 0..size {
-        let Some(existing) = guard
-            .get(dst)
-            .map(|container| container.get_item(slot).clone())
-        else {
+    for &slot in &slot_list {
+        if slot >= size {
+            continue;
+        }
+        let Some((existing, allowed)) = guard.get(dst).map(|container| {
+            (
+                container.get_item(slot).clone(),
+                container.can_place_item(slot, stack),
+            )
+        }) else {
             return false;
         };
-        if existing.is_empty()
+        if !allowed
+            || existing.is_empty()
             || !ItemStack::is_same_item_same_components(&existing, stack)
             || existing.count() >= max
         {
@@ -49,14 +72,19 @@ pub(crate) fn insert_one_item(
         return guard.set_item(dst, slot, existing.copy_with_count(existing.count() + 1));
     }
 
-    for slot in 0..size {
-        let Some(empty) = guard
-            .get(dst)
-            .map(|container| container.get_item(slot).is_empty())
-        else {
+    for &slot in &slot_list {
+        if slot >= size {
+            continue;
+        }
+        let Some((empty, allowed)) = guard.get(dst).map(|container| {
+            (
+                container.get_item(slot).is_empty(),
+                container.can_place_item(slot, stack),
+            )
+        }) else {
             return false;
         };
-        if empty {
+        if empty && allowed {
             return guard.set_item(dst, slot, stack.copy_with_count(1));
         }
     }
@@ -65,17 +93,40 @@ pub(crate) fn insert_one_item(
 
 /// Moves one item from the first non-empty slot of `src` into `dst`.
 pub(crate) fn move_one_item(guard: &mut ContainerLockGuard, src: ContainerId, dst: ContainerId) -> bool {
+    move_one_item_in_slots(guard, src, dst, None, None, None)
+}
+
+/// Moves one item honouring the automation slot views on both sides.
+pub(crate) fn move_one_item_in_slots(
+    guard: &mut ContainerLockGuard,
+    src: ContainerId,
+    dst: ContainerId,
+    src_slots: Option<&[usize]>,
+    dst_slots: Option<&[usize]>,
+    take_direction: Option<Direction>,
+) -> bool {
     if src == dst {
         return false;
     }
     let Some(size) = guard.get(src).map(Container::get_container_size) else {
         return false;
     };
-    for slot in 0..size {
-        let Some(stack) = guard.get(src).map(|container| container.get_item(slot).clone()) else {
+    let slot_list: Vec<usize> = src_slots.map_or_else(|| (0..size).collect(), <[usize]>::to_vec);
+    for &slot in &slot_list {
+        if slot >= size {
+            continue;
+        }
+        let Some((stack, can_take)) = guard.get(src).map(|container| {
+            (
+                container.get_item(slot).clone(),
+                take_direction.is_none_or(|direction| {
+                    container.can_take_item_through_face(slot, &container.get_item(slot), direction)
+                }),
+            )
+        }) else {
             return false;
         };
-        if stack.is_empty() || !insert_one_item(guard, dst, &stack) {
+        if !can_take || stack.is_empty() || !insert_one_item_in_slots(guard, dst, &stack, dst_slots) {
             continue;
         }
         guard.remove_item(src, slot, 1);

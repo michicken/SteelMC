@@ -360,6 +360,12 @@ impl AbstractFurnaceBlockEntity {
         load_all_items(nbt, &mut furnace.items);
         furnace.cooking_timer = nbt.int_value("cooking_time_spent").unwrap_or(0);
         furnace.cooking_total_time = nbt.int_value("cooking_total_time").unwrap_or(0);
+        // Imported/litematic furnaces often carry items but no cooking_total_time
+        // (a freshly placed furnace has 0). Derive the recipe time so the
+        // furnace can actually start smelting instead of stalling at timer 0.
+        if furnace.cooking_total_time == 0 && !furnace.items[SLOT_INPUT].is_empty() {
+            furnace.reset_cooking_for_input();
+        }
         furnace.lit_time_remaining = nbt.int_value("lit_time_remaining").unwrap_or(0);
         furnace.lit_total_time = nbt.int_value("lit_total_time").unwrap_or(0);
         furnace.recipes_used.clear();

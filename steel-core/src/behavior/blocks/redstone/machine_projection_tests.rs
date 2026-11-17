@@ -12,6 +12,7 @@ mod tests {
     use std::sync::Arc;
 
     use glam::DVec3;
+    use simdnbt::owned::{NbtCompound, NbtList};
     use steel_registry::blocks::block_state_ext::BlockStateExt as _;
     use steel_registry::blocks::properties::BlockStateProperties;
     use steel_registry::item_stack::ItemStack;
@@ -20,8 +21,8 @@ mod tests {
 
     use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
     use crate::test_support::{
-        dropped_items, fresh_test_world, insert_ready_full_chunk, load_litematic, paste_litematic,
-        tick_test_world, LitematicBuilder,
+        TestPlayerBuilder, dropped_items, fresh_test_world, insert_ready_full_chunk,
+        load_litematic, paste_litematic, tick_test_world, LitematicBuilder,
     };
 
     fn tick_world(world: &Arc<crate::world::World>, ticks: usize) {
@@ -394,6 +395,218 @@ mod tests {
             bottom > 0,
             "the bottom barrel must receive items from the 9-hopper stack"
         );
+    }
+
+    #[test]
+    fn litematic_furnace_pipeline_smelts_projected_input() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("furnace_pipeline");
+        let mut builder = LitematicBuilder::new("furnace_pipeline", (1, 5, 1));
+        builder.set(0, 0, 0, "minecraft:barrel", &[("facing", "up")]);
+        builder.set(0, 1, 0, "minecraft:hopper", &[("facing", "down")]);
+        builder.set(0, 2, 0, "minecraft:furnace", &[("facing", "north")]);
+        builder.set(0, 3, 0, "minecraft:hopper", &[("facing", "down")]);
+        builder.set(0, 4, 0, "minecraft:chest", &[]);
+
+        let mut input = NbtCompound::new();
+        input.insert("Slot", 0i8);
+        input.insert("id", "minecraft:iron_ore");
+        input.insert("count", 2i32);
+        let mut fuel = NbtCompound::new();
+        fuel.insert("Slot", 1i8);
+        fuel.insert("id", "minecraft:coal");
+        fuel.insert("count", 4i32);
+        let mut furnace = NbtCompound::new();
+        furnace.insert("id", "minecraft:furnace");
+        furnace.insert("Items", NbtList::Compound(vec![input, fuel]));
+        builder.set_tile_entity(0, 2, 0, furnace);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_furnace");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+
+        let origin = BlockPos::new(4, 1, 4);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert!(
+            report.failed_tile_entities.is_empty(),
+            "{:?}",
+            report.failed_tile_entities
+        );
+        assert_eq!(report.tile_entities_loaded, 1);
+
+        // Empty chest on top; the furnace input/fuel came from TileEntities.
+        // A player anchor keeps the chunk at block-ticking simulation level so
+        // the furnace block entity actually receives its tick.
+        let player = TestPlayerBuilder::new(Arc::clone(&world), "FurnaceAnchor", 7).build();
+        assert!(world.add_player(player, crate::player::ResetReason::InitialJoin));
+        assert_eq!(count_at(&world, origin.offset(0, 2, 0), 0), 2, "furnace input must load");
+        assert_eq!(count_at(&world, origin.offset(0, 2, 0), 1), 4, "furnace fuel must load");
+        for _ in 0..500 {
+            // The unit-test world does not run the block-entity ticker pass;
+            // drive the furnace directly, then let hoppers run on world ticks.
+            if let Some(block_entity) = world.get_block_entity(origin.offset(0, 2, 0)) {
+                block_entity.tick(&world);
+            }
+            tick_test_world(&world, 1, true);
+        }
+        // Let the extraction hopper finish moving any ingot still in the
+        // furnace result slot; its 8gt cooldown can straddle the smelt edge.
+        for _ in 0..200 {
+            if let Some(block_entity) = world.get_block_entity(origin.offset(0, 1, 0)) {
+                block_entity.tick(&world);
+            }
+            tick_test_world(&world, 1, true);
+        }
+
+        let result = count_at(&world, origin.offset(0, 2, 0), 2);
+        let input_left = count_at(&world, origin.offset(0, 2, 0), 0);
+        let fuel_left = count_at(&world, origin.offset(0, 2, 0), 1);
+        let barrel = count_at(&world, origin.offset(0, 0, 0), 0);
+        assert_eq!(
+            barrel + result,
+            2,
+            "both smelted ingots must be in the barrel or furnace output (input_left={input_left}, fuel_left={fuel_left})"
+        );
+        assert!(barrel > 0, "hopper must extract smelted ingots into the barrel");
+        let item_id = {
+            let container = container_at(&world, origin.offset(0, 0, 0));
+            let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+            guard
+                .get(container.container_id())
+                .expect("container")
+                .get_item(0)
+                .item()
+                .key
+                .clone()
+        };
+        assert_eq!(barrel, 2, "both projected raw iron items must smelt");
+        assert_eq!(
+            item_id,
+            Identifier::new_static("minecraft", "iron_ingot"),
+            "the barrel must contain smelted iron ingots"
+        );
+    }
+
+    #[test]
+    fn litematic_multi_region_places_and_loads_tile_entities() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("multi_region");
+        let mut builder = LitematicBuilder::new_multi(&[
+            ("base", [0, 0, 0], (2, 1, 1)),
+            ("storage", [2, 0, 0], (1, 1, 1)),
+        ]);
+        builder.set(0, 0, 0, "minecraft:stone", &[]);
+        builder.set(1, 0, 0, "minecraft:oak_planks", &[]);
+        builder.set_in_region(1, 0, 0, 0, "minecraft:chest", &[]);
+
+        let mut item = NbtCompound::new();
+        item.insert("Slot", 0i8);
+        item.insert("id", "minecraft:stone");
+        item.insert("count", 6i32);
+        let mut chest = NbtCompound::new();
+        chest.insert("id", "minecraft:chest");
+        chest.insert("Items", NbtList::Compound(vec![item]));
+        builder.set_tile_entity_in_region(1, 0, 0, 0, chest);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        assert_eq!(litematic.regions.len(), 2);
+        assert_eq!(litematic.regions[1].position, [2, 0, 0]);
+        assert_eq!(litematic.regions[1].tile_entities.len(), 1);
+
+        let test_world = fresh_test_world("machine_projection_multi_region");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+
+        let origin = BlockPos::new(6, 2, 6);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert!(report.failed_tile_entities.is_empty(), "{:?}", report.failed_tile_entities);
+        assert_eq!(report.placed, 3);
+        assert_eq!(report.tile_entities_loaded, 1);
+        assert_eq!(
+            block_id(world.get_block_state(origin.offset(1, 0, 0))),
+            Identifier::new_static("minecraft", "oak_planks"),
+            "first region block must land at its region position"
+        );
+        assert_eq!(
+            block_id(world.get_block_state(origin.offset(2, 0, 0))),
+            Identifier::new_static("minecraft", "chest"),
+            "second region block must land at its region position"
+        );
+        assert_eq!(
+            count_at(&world, origin.offset(2, 0, 0), 0),
+            6,
+            "tile entity in the second region must load its items"
+        );
+    }
+
+    #[test]
+    fn litematic_tile_entities_import_chest_contents() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("tile_entity_chest");
+        let mut builder = LitematicBuilder::new("tile_entity_chest", (1, 3, 1));
+        builder.set(0, 0, 0, "minecraft:barrel", &[("facing", "up")]);
+        builder.set(0, 1, 0, "minecraft:hopper", &[("facing", "down")]);
+        builder.set(0, 2, 0, "minecraft:chest", &[]);
+
+        let mut item = NbtCompound::new();
+        item.insert("Slot", 0i8);
+        item.insert("id", "minecraft:stone");
+        item.insert("count", 8i32);
+        let mut chest = NbtCompound::new();
+        chest.insert("id", "minecraft:chest");
+        chest.insert("Items", NbtList::Compound(vec![item]));
+        builder.set_tile_entity(0, 2, 0, chest);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        assert_eq!(litematic.regions[0].tile_entities.len(), 1);
+        assert_eq!(litematic.regions[0].tile_entities[0].pos, [0, 2, 0]);
+
+        let test_world = fresh_test_world("machine_projection_tile_entity");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+
+        let origin = BlockPos::new(4, 1, 4);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert!(
+            report.failed_tile_entities.is_empty(),
+            "{:?}",
+            report.failed_tile_entities
+        );
+        assert_eq!(report.tile_entities_loaded, 1);
+
+        // No manual set_slot: the chest contents must come from TileEntities.
+        let chest_count = count_at(&world, origin.offset(0, 2, 0), 0);
+        assert_eq!(chest_count, 8, "projection must import chest slot contents");
+
+        for _ in 0..200 {
+            tick_test_world(&world, 1, true);
+        }
+
+        let chest_after = count_at(&world, origin.offset(0, 2, 0), 0);
+        let hopper = count_at(&world, origin.offset(0, 1, 0), 0);
+        let barrel = count_at(&world, origin.offset(0, 0, 0), 0);
+        assert_eq!(
+            chest_after + hopper + barrel,
+            8,
+            "items from the imported chest must be conserved (chest={chest_after}, hopper={hopper}, barrel={barrel})"
+        );
+        assert!(barrel > 0, "hopper must move imported chest items into the barrel");
     }
 
     #[test]

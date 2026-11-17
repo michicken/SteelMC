@@ -34,7 +34,7 @@ use crate::{
     entity::{Entity as _, RemovalReason, entities::ItemEntity},
     inventory::{
         lock::{ContainerLockGuard, ContainerRef},
-        transfer::{insert_stack, move_one_item},
+        transfer::{insert_stack, move_one_item_in_slots},
     },
     nameable::Nameable,
     world::World,
@@ -173,7 +173,20 @@ impl HopperBlockEntity {
             );
             return false;
         };
-        move_one_item(&mut guard, own.container_id(), target.container_id())
+        // Insert through the target's face opposite the hopper's output side
+        // (a hopper facing down inserts into a furnace's `Up` view).
+        let target_slots = guard
+            .get(target.container_id())
+            .and_then(|container| container.slots_for_face(facing.opposite()))
+            .map(<[usize]>::to_vec);
+        move_one_item_in_slots(
+            &mut guard,
+            own.container_id(),
+            target.container_id(),
+            None,
+            target_slots.as_deref(),
+            None,
+        )
     }
 
     /// Moves at most one item out of the container above this hopper.
@@ -190,7 +203,21 @@ impl HopperBlockEntity {
             log::warn!("could not lock hopper pull containers at {:?}", self.get_block_pos());
             return false;
         };
-        move_one_item(&mut guard, source.container_id(), own.container_id())
+        // A hopper pulls through the source container's `Down` automation view:
+        // a furnace below-face view exposes only the result slot, so raw input
+        // and fuel can never be sucked out by the hopper underneath.
+        let source_slots = guard
+            .get(source.container_id())
+            .and_then(|container| container.slots_for_face(steel_registry::blocks::properties::Direction::Down))
+            .map(<[usize]>::to_vec);
+        move_one_item_in_slots(
+            &mut guard,
+            source.container_id(),
+            own.container_id(),
+            source_slots.as_deref(),
+            None,
+            Some(steel_registry::blocks::properties::Direction::Down),
+        )
     }
 }
 

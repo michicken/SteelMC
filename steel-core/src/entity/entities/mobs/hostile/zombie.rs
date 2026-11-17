@@ -283,7 +283,7 @@ impl PathfinderMob for ZombieEntity {}
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Weak};
+    use std::sync::Arc;
 
     use glam::DVec3;
     use steel_registry::{init_vanilla_registry, vanilla_entities};
