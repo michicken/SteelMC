@@ -1,5 +1,5 @@
 use std::iter::empty;
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 
 use glam::DVec3;
 use rand::Rng;
@@ -10,25 +10,99 @@ use steel_protocol::packets::game::SoundSource;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::SkeletonEntityData;
-use steel_registry::{sound_events, vanilla_attributes};
+use steel_registry::{sound_events, vanilla_attributes, vanilla_entities};
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
 
 use crate::entity::ai::goal::{
-    FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal,
+    FloatGoal, Goal, GoalControls, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal,
     NearestAttackableTargetGoal, RandomLookAroundGoal, WaterAvoidingRandomStrollGoal,
 };
+use crate::entity::entities::objects::projectiles::ArrowEntity;
 use crate::entity::damage::DamageSource;
 use crate::entity::{
     DefaultEntityPush, Entity, EntityBase, EntityBaseLoad, EntityMovementEmission, EntityPose,
     EntitySpawnReason, EntitySyncedData, LivingEntity, LivingEntityBase, Mob, MobBase, Monster,
-    PathfinderMob, SharedEntity, SpawnRule, sync_dirty_mob_effects,
+    PathfinderMob, Projectile, SharedEntity, SpawnRule, next_entity_id, sync_dirty_mob_effects,
 };
 use crate::physics::MoveResult;
 use crate::world::{LevelReader, World};
 
 const DEFAULT_STEP_HEIGHT: f32 = 0.6;
 const XP_REWARD: i32 = 5;
+const BOW_RANGE_SQR: f64 = 15.0 * 15.0;
+const BOW_COOLDOWN_TICKS: i32 = 20;
+const ARROW_SPEED: f64 = 2.0;
+const ARROW_ARC_LIFT: f64 = 0.12;
+
+/// Vanilla-shaped skeleton bow attack: keeps its distance and fires an arrow
+/// every 20 ticks at the current target.
+struct BowAttackGoal {
+    cooldown: i32,
+}
+
+impl BowAttackGoal {
+    const fn new() -> Self {
+        Self { cooldown: 0 }
+    }
+
+    fn fire(&mut self, mob: &dyn PathfinderMob, entity: &SharedEntity) -> Option<SharedEntity> {
+        let target = mob.target()?;
+        let world = mob.level()?;
+        let origin = DVec3::new(mob.position().x, mob.get_eye_y(), mob.position().z);
+        let target_eye = DVec3::new(
+            target.position().x,
+            target.get_eye_y(),
+            target.position().z,
+        );
+        let mut direction = (target_eye - origin).normalize_or_zero();
+        if !direction.is_finite() || direction.length_squared() < 1.0e-9 {
+            return None;
+        }
+        direction.y += ARROW_ARC_LIFT;
+
+        let arrow_typed = Arc::new(ArrowEntity::new(
+            &vanilla_entities::ARROW,
+            next_entity_id(),
+            origin + direction * 0.5,
+            Arc::downgrade(&world),
+        ));
+        arrow_typed.set_owner_entity(Some(entity));
+        arrow_typed.set_velocity(direction * ARROW_SPEED);
+        arrow_typed.mark_velocity_sync();
+        let arrow: SharedEntity = arrow_typed;
+        world.try_add_entity(Arc::clone(&arrow)).ok()?;
+        Some(arrow)
+    }
+}
+
+impl Goal for BowAttackGoal {
+    fn controls(&self) -> GoalControls {
+        GoalControls::MOVE | GoalControls::LOOK
+    }
+
+    fn can_use(&mut self, mob: &dyn PathfinderMob) -> bool {
+        let Some(target) = mob.target() else {
+            return false;
+        };
+        mob.position().distance_squared(target.position()) <= BOW_RANGE_SQR
+            && mob.has_line_of_sight_cached(target.as_ref())
+    }
+
+    fn tick(&mut self, mob: &dyn PathfinderMob, entity: &SharedEntity) {
+        if self.cooldown > 0 {
+            self.cooldown -= 1;
+            return;
+        }
+        if self.fire(mob, entity).is_some() {
+            self.cooldown = BOW_COOLDOWN_TICKS;
+        }
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+}
 
 /// A hostile skeleton entity.
 #[entity_behavior(class = "Skeleton", spawn_rule)]
@@ -96,7 +170,8 @@ impl SkeletonEntity {
         {
             let mut goal_selector = mob_base.goal_selector().lock();
             goal_selector.add_goal(0, FloatGoal::new(&mob_base));
-            goal_selector.add_goal(2, MeleeAttackGoal::new(1.0, false));
+            goal_selector.add_goal(2, BowAttackGoal::new());
+            goal_selector.add_goal(3, MeleeAttackGoal::new(1.0, false));
             goal_selector.add_goal(7, WaterAvoidingRandomStrollGoal::new(1.0));
             goal_selector.add_goal(8, LookAtPlayerGoal::new(8.0));
             goal_selector.add_goal(8, RandomLookAroundGoal::new());
@@ -288,11 +363,15 @@ mod tests {
 
     use glam::DVec3;
     use steel_registry::{init_vanilla_registry, vanilla_entities};
-    use steel_utils::{ChunkPos, Downcast as _};
+    use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+    use steel_registry::vanilla_blocks;
+    use steel_utils::{BlockPos, ChunkPos, Downcast as _};
 
     use super::SkeletonEntity;
     use crate::entity::{Entity, LivingEntity, SharedEntity, next_entity_id};
-    use crate::test_support::{fresh_test_world, insert_ready_full_chunk, tick_test_world};
+    use crate::test_support::{
+        TestPlayerBuilder, fresh_test_world, insert_ready_full_chunk, tick_test_world,
+    };
 
     #[test]
     fn skeleton_entity_registers_spawns_and_keeps_vanilla_health() {
@@ -325,5 +404,58 @@ mod tests {
             skeleton_entity.base_tick();
         }
         assert!(Entity::is_alive(skeleton_entity), "skeleton must survive its first ticks");
+    }
+
+    #[test]
+    fn skeleton_bow_ai_shoots_real_arrows_at_a_player() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+        let fixture = fresh_test_world("skeleton_bow");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        for x in 0..20 {
+            for z in 0..16 {
+                world.set_block(
+                    BlockPos::new(x, 64, z),
+                    vanilla_blocks::STONE.default_state(),
+                    steel_utils::types::UpdateFlags::UPDATE_CLIENTS,
+                );
+            }
+        }
+
+        let player = TestPlayerBuilder::new(Arc::clone(world), "SkelBowTarget", 9).build();
+        player
+            .teleport_to(DVec3::new(13.5, 65.0, 8.5))
+            .expect("player should teleport onto the platform");
+        assert!(world.add_player(player.clone(), crate::player::ResetReason::InitialJoin));
+
+        let skeleton: SharedEntity = Arc::new(SkeletonEntity::new(
+            &vanilla_entities::SKELETON,
+            next_entity_id(),
+            DVec3::new(8.5, 65.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&skeleton))
+            .expect("skeleton should attach to the loaded chunk");
+        let skeleton_entity = skeleton
+            .downcast_ref::<SkeletonEntity>()
+            .expect("skeleton is concrete");
+
+        for _ in 0..60 {
+            tick_test_world(world, 1, true);
+            skeleton_entity.ai_step(&skeleton);
+            skeleton_entity.base_tick();
+        }
+
+        let arrows = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(5.0, 64.0, 5.0, 16.0, 70.0, 12.0),
+            Entity::is_abstract_arrow,
+        );
+        assert!(
+            !arrows.is_empty(),
+            "skeleton bow AI must spawn at least one arrow entity"
+        );
     }
 }
