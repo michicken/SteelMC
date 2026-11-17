@@ -264,6 +264,83 @@ mod tests {
     }
 
     #[test]
+    fn litematic_hopper_comparator_sorter_senses_filter_item_through_dust() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("sorter_sense");
+        let mut builder = LitematicBuilder::new("sorter_sense", (3, 2, 1));
+        for x in 0..3 {
+            builder.set(x, 0, 0, "minecraft:stone", &[]);
+        }
+        // Comparator "facing" is the side it reads; it outputs behind it.
+        builder.set(2, 1, 0, "minecraft:hopper", &[("facing", "down")]);
+        builder.set(
+            1,
+            1,
+            0,
+            "minecraft:comparator",
+            &[("facing", "east")],
+        );
+        builder.set(0, 1, 0, "minecraft:redstone_wire", &[]);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_sorter_sense");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        let origin = BlockPos::new(3, 2, 3);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+
+        let hopper_pos = origin.offset(2, 1, 0);
+        let dust_pos = origin.offset(0, 1, 0);
+
+        // 1 diamond in a 5-slot hopper is a weak analog signal (1), the
+        // canonical "filter item" state of a sorting hopper.
+        set_slot(
+            &world,
+            hopper_pos,
+            0,
+            ItemStack::with_count(&vanilla_items::DIAMOND, 1),
+        );
+        world.update_neighbors_at(hopper_pos, &vanilla_blocks::HOPPER);
+        tick_world(&world, 4);
+        world.run_block_events();
+        let comparator_pos = origin.offset(1, 1, 0);
+        assert!(
+            world
+                .get_block_state(comparator_pos)
+                .get_value(&BlockStateProperties::POWERED),
+            "comparator must see the filter item and turn on"
+        );
+        let weak = world
+            .get_block_state(dust_pos)
+            .get_value(&BlockStateProperties::POWER);
+        assert_eq!(weak, 1, "one filter item must produce a 1-strength dust signal");
+
+        // Filling the hopper raises the analog signal; the comparator must
+        // follow the container fullness, not a constant.
+        set_slot(
+            &world,
+            hopper_pos,
+            0,
+            ItemStack::with_count(&vanilla_items::DIAMOND, 64),
+        );
+        world.update_neighbors_at(hopper_pos, &vanilla_blocks::HOPPER);
+        tick_world(&world, 4);
+        world.run_block_events();
+        let strong = world
+            .get_block_state(dust_pos)
+            .get_value(&BlockStateProperties::POWER);
+        assert!(
+            strong > weak,
+            "full hopper must raise the dust signal, weak={weak} strong={strong}"
+        );
+    }
+
+    #[test]
     fn litematic_hopper_pipeline_transfers_items_down_two_levels() {
         steel_registry::init_vanilla_registry();
         crate::behavior::init_behaviors();
