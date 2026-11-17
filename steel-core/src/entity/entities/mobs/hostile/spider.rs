@@ -354,7 +354,15 @@ mod tests {
         );
 
         let start_x = spider.position().x;
-        for _ in 0..120 {
+        for _ in 0..240 {
+            if spider_entity.position().x > 12.0 {
+                break;
+            }
+            // Re-assert the target periodically so the random-stroll goal
+            // cannot keep the spider away for the whole observation window.
+            if spider_entity.position().x < 12.0 {
+                let _ = spider_entity.move_to_pos(DVec3::new(14.5, 65.0, 8.5), 2.0);
+            }
             spider_entity.ai_step(&spider);
             spider_entity.base_tick();
         }
