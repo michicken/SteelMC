@@ -395,4 +395,49 @@ mod tests {
             "the bottom barrel must receive items from the 9-hopper stack"
         );
     }
+
+    #[test]
+    fn litematic_observer_detects_piston_and_pulses_lamp() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("observer_piston_lamp");
+        let mut builder = LitematicBuilder::new("observer_piston_lamp", (4, 3, 1));
+        // x=0 redstone block powers x=1 piston facing up; the piston pushes
+        // the stone at y=2. x=2 observer faces west (watches the piston base)
+        // and outputs east into the lamp at x=3.
+        builder.set(0, 1, 0, "minecraft:redstone_block", &[]);
+        builder.set(1, 0, 0, "minecraft:stone", &[]);
+        builder.set(1, 1, 0, "minecraft:piston", &[("facing", "up")]);
+        builder.set(1, 2, 0, "minecraft:stone", &[]);
+        builder.set(2, 1, 0, "minecraft:observer", &[("facing", "west")]);
+        builder.set(3, 1, 0, "minecraft:redstone_lamp", &[]);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_observer");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+
+        let origin = BlockPos::new(2, 2, 2);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+
+        let lamp_pos = origin.offset(3, 1, 0);
+        let mut saw_lamp_lit = false;
+        for _ in 0..8 {
+            tick_world(&world, 1);
+            if world
+                .get_block_state(lamp_pos)
+                .get_value(&BlockStateProperties::LIT)
+            {
+                saw_lamp_lit = true;
+            }
+        }
+        assert!(
+            saw_lamp_lit,
+            "observer must witness the piston extension and pulse the lamp"
+        );
+    }
 }
