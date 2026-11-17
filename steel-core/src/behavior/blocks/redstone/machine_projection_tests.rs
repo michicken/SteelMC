@@ -387,6 +387,104 @@ mod tests {
     }
 
     #[test]
+    fn litematic_two_by_two_sticky_piston_door_moves_and_returns() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("two_by_two_door");
+        let mut builder = LitematicBuilder::new("two_by_two_door", (3, 2, 2));
+        for y in 0..2 {
+            for z in 0..2 {
+                builder.set(
+                    0,
+                    y,
+                    z,
+                    "minecraft:sticky_piston",
+                    &[("facing", "east"), ("extended", "false")],
+                );
+                builder.set(1, y, z, "minecraft:stone", &[]);
+            }
+        }
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_two_by_two_door");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        let origin = BlockPos::new(6, 3, 4);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+
+        let power_positions: Vec<BlockPos> = (0..2)
+            .flat_map(|y| (0..2).map(move |z| origin.offset(-1, y, z)))
+            .collect();
+        for pos in &power_positions {
+            world.set_block(
+                *pos,
+                vanilla_blocks::REDSTONE_BLOCK.default_state(),
+                steel_utils::types::UpdateFlags::UPDATE_CLIENTS
+                    | steel_utils::types::UpdateFlags::UPDATE_NEIGHBORS,
+            );
+            world.update_neighbors_at(*pos, &vanilla_blocks::REDSTONE_BLOCK);
+        }
+        for y in 0..2 {
+            for z in 0..2 {
+                world.update_neighbors_at(origin.offset(0, y, z), &vanilla_blocks::STICKY_PISTON);
+            }
+        }
+        tick_world(&world, 6);
+        world.run_block_events();
+
+        for y in 0..2 {
+            for z in 0..2 {
+                assert_eq!(
+                    block_id(world.get_block_state(origin.offset(2, y, z))),
+                    Identifier::new_static("minecraft", "stone"),
+                    "the 2x2 door must push all four blocks to x+2"
+                );
+                assert_eq!(
+                    block_id(world.get_block_state(origin.offset(1, y, z))),
+                    Identifier::new_static("minecraft", "piston_head"),
+                    "each extended piston must own its head"
+                );
+            }
+        }
+
+        for pos in &power_positions {
+            world.set_block(
+                *pos,
+                vanilla_blocks::AIR.default_state(),
+                steel_utils::types::UpdateFlags::UPDATE_CLIENTS
+                    | steel_utils::types::UpdateFlags::UPDATE_NEIGHBORS,
+            );
+            world.update_neighbors_at(*pos, &vanilla_blocks::REDSTONE_BLOCK);
+        }
+        for y in 0..2 {
+            for z in 0..2 {
+                world.update_neighbors_at(origin.offset(0, y, z), &vanilla_blocks::STICKY_PISTON);
+            }
+        }
+        tick_world(&world, 6);
+        world.run_block_events();
+
+        for y in 0..2 {
+            for z in 0..2 {
+                assert_eq!(
+                    block_id(world.get_block_state(origin.offset(1, y, z))),
+                    Identifier::new_static("minecraft", "stone"),
+                    "retracting sticky pistons must pull all four blocks back"
+                );
+                assert_eq!(
+                    block_id(world.get_block_state(origin.offset(2, y, z))),
+                    Identifier::new_static("minecraft", "air"),
+                    "the pushed column must be cleared after retraction"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn litematic_two_piston_gate_pushes_two_blocks() {
         steel_registry::init_vanilla_registry();
         crate::behavior::init_behaviors();
