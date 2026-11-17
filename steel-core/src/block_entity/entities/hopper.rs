@@ -17,7 +17,6 @@ use simdnbt::borrow::NbtCompound as NbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{BlockStateProperties, BoolProperty};
-use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_block_entity_types;
 use steel_utils::{
     BlockPos, BlockStateId, DowncastType, DowncastTypeKey, locks::SyncMutex, nbt::NbtValueInput as _,
@@ -32,8 +31,8 @@ use crate::{
         randomizable_container::RandomizableContainerStorage,
     },
     inventory::{
-        container::Container,
-        lock::{ContainerId, ContainerLockGuard, ContainerRef},
+        lock::{ContainerLockGuard, ContainerRef},
+        transfer::move_one_item,
     },
     nameable::Nameable,
     world::World,
@@ -128,7 +127,7 @@ impl HopperBlockEntity {
             );
             return false;
         };
-        move_one(&mut guard, own.container_id(), target.container_id())
+        move_one_item(&mut guard, own.container_id(), target.container_id())
     }
 
     /// Moves at most one item out of the container above this hopper.
@@ -145,7 +144,7 @@ impl HopperBlockEntity {
             log::warn!("could not lock hopper pull containers at {:?}", self.get_block_pos());
             return false;
         };
-        move_one(&mut guard, source.container_id(), own.container_id())
+        move_one_item(&mut guard, source.container_id(), own.container_id())
     }
 }
 
@@ -201,74 +200,6 @@ impl Nameable for HopperBlockEntity {
     }
 }
 
-/// Inserts a single item from `stack` into `dst`.
-///
-/// Merges into an existing compatible stack first, then falls back to an empty slot.
-/// Returns `true` when exactly one item was placed.
-fn insert_one(guard: &mut ContainerLockGuard, dst: ContainerId, stack: &ItemStack) -> bool {
-    if stack.is_empty() {
-        return false;
-    }
-    let Some((size, max)) = guard
-        .get(dst)
-        .map(|container| {
-            (
-                container.get_container_size(),
-                container.get_max_stack_size_for_item(stack),
-            )
-        })
-    else {
-        return false;
-    };
-    if max <= 0 {
-        return false;
-    }
-
-    for slot in 0..size {
-        let Some(existing) = guard.get(dst).map(|container| container.get_item(slot).clone()) else {
-            return false;
-        };
-        if existing.is_empty()
-            || !ItemStack::is_same_item_same_components(&existing, stack)
-            || existing.count() >= max
-        {
-            continue;
-        }
-        return guard.set_item(dst, slot, existing.copy_with_count(existing.count() + 1));
-    }
-
-    for slot in 0..size {
-        let Some(empty) = guard.get(dst).map(|container| container.get_item(slot).is_empty()) else {
-            return false;
-        };
-        if empty {
-            return guard.set_item(dst, slot, stack.copy_with_count(1));
-        }
-    }
-    false
-}
-
-/// Moves one item from the first non-empty slot of `src` into `dst`.
-fn move_one(guard: &mut ContainerLockGuard, src: ContainerId, dst: ContainerId) -> bool {
-    if src == dst {
-        return false;
-    }
-    let Some(size) = guard.get(src).map(Container::get_container_size) else {
-        return false;
-    };
-    for slot in 0..size {
-        let Some(stack) = guard.get(src).map(|container| container.get_item(slot).clone()) else {
-            return false;
-        };
-        if stack.is_empty() || !insert_one(guard, dst, &stack) {
-            continue;
-        }
-        guard.remove_item(src, slot, 1);
-        return true;
-    }
-    false
-}
-
 const ENABLED: &BoolProperty = &BlockStateProperties::ENABLED;
 const FACING: &steel_registry::blocks::properties::EnumProperty<
     steel_registry::blocks::properties::Direction,
@@ -281,10 +212,11 @@ mod tests {
     use steel_registry::{item_stack::ItemStack, vanilla_items};
     use steel_utils::locks::{IntoShared as _, SyncMutex};
 
-    use super::{HOPPER_SLOTS, move_one};
+    use super::HOPPER_SLOTS;
     use crate::inventory::{
         container::{Container, SimpleContainer},
         lock::{ContainerLockGuard, ContainerRef},
+        transfer::move_one_item,
     };
 
     fn container_ref(size: usize) -> (Arc<SyncMutex<SimpleContainer>>, ContainerRef) {
@@ -302,7 +234,7 @@ mod tests {
             .set_item(0, ItemStack::with_count(&vanilla_items::STONE, 5));
 
         let mut guard = ContainerLockGuard::lock_all(&[&source, &target]).expect("locks");
-        assert!(move_one(
+        assert!(move_one_item(
             &mut guard,
             source.container_id(),
             target.container_id()
@@ -313,7 +245,7 @@ mod tests {
         assert_eq!(target_container.lock().get_item(0).count(), 1);
 
         let mut guard = ContainerLockGuard::lock_all(&[&source, &target]).expect("locks");
-        assert!(move_one(
+        assert!(move_one_item(
             &mut guard,
             source.container_id(),
             target.container_id()
@@ -336,7 +268,7 @@ mod tests {
             .set_item(0, ItemStack::with_count(&vanilla_items::STONE, 64));
 
         let mut guard = ContainerLockGuard::lock_all(&[&source, &target]).expect("locks");
-        assert!(!move_one(
+        assert!(!move_one_item(
             &mut guard,
             source.container_id(),
             target.container_id()
@@ -359,7 +291,7 @@ mod tests {
             .set_item(0, ItemStack::with_count(&vanilla_items::DIRT, 1));
 
         let mut guard = ContainerLockGuard::lock_all(&[&source, &target]).expect("locks");
-        assert!(move_one(
+        assert!(move_one_item(
             &mut guard,
             source.container_id(),
             target.container_id()
