@@ -16,7 +16,7 @@ mod tests {
     use steel_registry::blocks::block_state_ext::BlockStateExt as _;
     use steel_registry::blocks::properties::BlockStateProperties;
     use steel_registry::item_stack::ItemStack;
-    use steel_registry::vanilla_items;
+    use steel_registry::{vanilla_blocks, vanilla_items};
     use steel_utils::{BlockPos, ChunkPos, Identifier};
 
     use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
@@ -555,6 +555,186 @@ mod tests {
             count_at(&world, origin.offset(2, 0, 0), 0),
             6,
             "tile entity in the second region must load its items"
+        );
+    }
+
+    #[test]
+    fn litematic_oak_sapling_bonemeal_grows_tree() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("oak_sapling_tree");
+        let mut builder = LitematicBuilder::new("oak_sapling_tree", (7, 2, 7));
+        for x in 0..7 {
+            for z in 0..7 {
+                builder.set(x, 0, z, "minecraft:dirt", &[]);
+            }
+        }
+        builder.set(3, 1, 3, "minecraft:oak_sapling", &[]);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_oak_tree");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        let origin = BlockPos::new(8, 64, 8);
+        for chunk_x in 0..=2 {
+            for chunk_z in 0..=2 {
+                insert_ready_full_chunk(&world, ChunkPos::new(chunk_x, chunk_z));
+            }
+        }
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert_eq!(report.placed, 50);
+
+        let sapling_pos = origin.offset(3, 1, 3);
+        let state = world.get_block_state(sapling_pos);
+        assert_eq!(
+            block_id(state),
+            Identifier::new_static("minecraft", "oak_sapling")
+        );
+        let behavior = crate::behavior::blocks::vegetation::SaplingBlock::new(
+            &steel_registry::vanilla_blocks::OAK_SAPLING,
+        );
+        let mut placed = false;
+        for seed in 0..64 {
+            use rand::SeedableRng as _;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            use crate::behavior::blocks::vegetation::bonemealable::Bonemealable as _;
+            behavior.perform_bonemeal(state, &world, &mut rng, sapling_pos);
+            if world.get_block_state(sapling_pos).get_block()
+                != &steel_registry::vanilla_blocks::OAK_SAPLING
+            {
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "at least one seeded bonemeal attempt must grow the tree");
+
+        let mut oak_logs = 0;
+        for dx in -4..=4 {
+            for dy in 0..8 {
+                for dz in -4..=4 {
+                    let pos = sapling_pos.offset(dx, dy, dz);
+                    if block_id(world.get_block_state(pos))
+                        == Identifier::new_static("minecraft", "oak_log")
+                    {
+                        oak_logs += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            oak_logs >= 4,
+            "a grown oak must place a trunk, found {oak_logs} logs"
+        );
+    }
+
+    #[test]
+    fn litematic_dispenser_bonemeal_grows_projected_sapling() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("dispenser_sapling_tree");
+        let mut builder = LitematicBuilder::new("dispenser_sapling_tree", (7, 8, 7));
+        for x in 0..7 {
+            for z in 0..7 {
+                builder.set(x, 0, z, "minecraft:dirt", &[]);
+            }
+        }
+        builder.set(2, 1, 3, "minecraft:oak_sapling", &[]);
+        builder.set(
+            1,
+            1,
+            3,
+            "minecraft:dispenser",
+            &[("facing", "east")],
+        );
+        builder.set(0, 1, 3, "minecraft:redstone_block", &[]);
+
+        let mut bone_meal = NbtCompound::new();
+        bone_meal.insert("Slot", 0i8);
+        bone_meal.insert("id", "minecraft:bone_meal");
+        bone_meal.insert("count", 64i32);
+        let mut dispenser = NbtCompound::new();
+        dispenser.insert("id", "minecraft:dispenser");
+        dispenser.insert("Items", NbtList::Compound(vec![bone_meal]));
+        builder.set_tile_entity(1, 1, 3, dispenser);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_dispenser_tree");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        let origin = BlockPos::new(8, 64, 8);
+        for chunk_x in 0..=2 {
+            for chunk_z in 0..=2 {
+                insert_ready_full_chunk(&world, ChunkPos::new(chunk_x, chunk_z));
+            }
+        }
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert_eq!(report.tile_entities_loaded, 1);
+
+        let dispenser_pos = origin.offset(1, 1, 3);
+        let power_pos = origin.offset(0, 1, 3);
+        let sapling_pos = origin.offset(2, 1, 3);
+        let mut grown = false;
+        for _ in 0..64 {
+            world.set_block(
+                power_pos,
+                vanilla_blocks::REDSTONE_BLOCK.default_state(),
+                steel_utils::types::UpdateFlags::UPDATE_CLIENTS,
+            );
+            world.update_neighbors_at(power_pos, &vanilla_blocks::REDSTONE_BLOCK);
+            world.run_block_events();
+            tick_world(&world, 2);
+            world.set_block(
+                power_pos,
+                vanilla_blocks::AIR.default_state(),
+                steel_utils::types::UpdateFlags::UPDATE_CLIENTS,
+            );
+            world.update_neighbors_at(power_pos, &vanilla_blocks::REDSTONE_BLOCK);
+            world.run_block_events();
+            tick_world(&world, 2);
+            if world.get_block_state(sapling_pos).get_block()
+                != &vanilla_blocks::OAK_SAPLING
+            {
+                grown = true;
+                break;
+            }
+        }
+        let dispenser_state = world.get_block_state(dispenser_pos);
+        assert_eq!(
+            dispenser_state.get_value(&BlockStateProperties::FACING),
+            steel_utils::Direction::East,
+            "dispenser must face the sapling"
+        );
+        let remaining_bone_meal = if world.get_block_entity(dispenser_pos).is_some() {
+            count_at(&world, dispenser_pos, 0)
+        } else {
+            -1
+        };
+        assert!(
+            grown,
+            "dispenser must bonemeal the oak sapling into a tree; remaining bone meal={remaining_bone_meal}, facing={:?}",
+            world.get_block_state(dispenser_pos)
+        );
+        let logs = (-4..=4)
+            .flat_map(|dx| (-4..=4).map(move |dz| (dx, dz)))
+            .map(|(dx, dz)| {
+                (0..8)
+                    .filter(|dy| {
+                        block_id(world.get_block_state(sapling_pos.offset(dx, *dy, dz)))
+                            == Identifier::new_static("minecraft", "oak_log")
+                    })
+                    .count()
+            })
+            .sum::<usize>();
+        assert!(logs >= 4, "grown oak must leave a trunk, found {logs} logs");
+        assert_eq!(
+            block_id(world.get_block_state(dispenser_pos)),
+            Identifier::new_static("minecraft", "dispenser")
         );
     }
 
