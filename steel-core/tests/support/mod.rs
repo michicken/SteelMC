@@ -48,10 +48,7 @@ mod litematic;
 mod player;
 
 pub(crate) use connection::TestConnection;
-pub(crate) use litematic::{
-    Litematic, LitematicBuilder, LitematicRegion, PasteReport, load_litematic, parse_litematic,
-    paste_litematic,
-};
+pub(crate) use litematic::{LitematicBuilder, load_litematic, paste_litematic};
 pub(crate) use player::{TestPlayerBuilder, test_runtime_config};
 
 /// Edge length of the cube searched for dropped items in tests.
