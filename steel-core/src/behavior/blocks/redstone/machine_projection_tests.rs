@@ -31,6 +31,14 @@ mod tests {
         }
     }
 
+    /// Vanilla's block-entity ticker is a separate pass from the world tick;
+    /// the test world does not run it implicitly, so piston animations need it.
+    fn tick_block_entities(world: &Arc<crate::world::World>, ticks: usize) {
+        for _ in 0..ticks {
+            world.block_entity_tickers().tick(world, true);
+        }
+    }
+
     fn container_at(world: &Arc<crate::world::World>, pos: BlockPos) -> ContainerRef {
         ContainerRef::from_block_entity(world.get_block_entity(pos).expect("block entity"))
             .expect("container")
@@ -664,6 +672,75 @@ mod tests {
             "items must be conserved across the chunk boundary (top={top}, middle={middle_total}, bottom={bottom})"
         );
         assert!(bottom > 0, "the barrel across the chunk boundary must receive items");
+    }
+
+    #[test]
+    fn litematic_sticky_piston_pulls_slime_cluster() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("sticky_slime_pull");
+        let mut builder = LitematicBuilder::new("sticky_slime_pull", (5, 1, 1));
+        builder.set(
+            0,
+            0,
+            0,
+            "minecraft:sticky_piston",
+            &[("facing", "east"), ("extended", "true")],
+        );
+        builder.set(
+            1,
+            0,
+            0,
+            "minecraft:piston_head",
+            &[("facing", "east"), ("type", "sticky")],
+        );
+        builder.set(2, 0, 0, "minecraft:slime_block", &[]);
+        builder.set(3, 0, 0, "minecraft:stone", &[]);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_sticky_slime");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+
+        let origin = BlockPos::new(4, 2, 4);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert_eq!(
+            block_id(world.get_block_state(origin.offset(2, 0, 0))),
+            Identifier::new_static("minecraft", "slime_block")
+        );
+
+        // Removing the (never present) power source is emulated by a neighbour
+        // update, which is exactly what vanilla uses to notice retraction.
+        world.update_neighbors_at(origin, &steel_registry::vanilla_blocks::STICKY_PISTON);
+        world.run_block_events();
+        tick_test_world(&world, 2, true);
+        tick_block_entities(&world, 5);
+        world.run_block_events();
+        tick_test_world(&world, 2, true);
+        tick_block_entities(&world, 5);
+
+        assert_eq!(
+            block_id(world.get_block_state(origin)),
+            Identifier::new_static("minecraft", "sticky_piston")
+        );
+        assert_eq!(
+            block_id(world.get_block_state(origin.offset(1, 0, 0))),
+            Identifier::new_static("minecraft", "slime_block"),
+            "retracting sticky piston must pull the slime block one step"
+        );
+        assert_eq!(
+            block_id(world.get_block_state(origin.offset(2, 0, 0))),
+            Identifier::new_static("minecraft", "stone"),
+            "the block attached to the slime cluster must move with it"
+        );
+        assert!(
+            world.get_block_state(origin.offset(3, 0, 0)).is_air(),
+            "the trailing position must be vacated"
+        );
     }
 
     #[test]
