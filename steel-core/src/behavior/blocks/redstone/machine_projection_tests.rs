@@ -397,6 +397,63 @@ mod tests {
     }
 
     #[test]
+    fn litematic_cross_chunk_hopper_line_transfers_items() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        // 18 hoppers laid east/west; origin x=2 pushes the line across the
+        // x=16 chunk boundary. Both chunks are loaded before pasting.
+        let path = fixture_path("cross_chunk_hopper_line");
+        let length = 19;
+        let mut builder = LitematicBuilder::new("cross_chunk_hopper_line", (length, 2, 1));
+        for x in 0..length - 1 {
+            builder.set(x, 1, 0, "minecraft:hopper", &[("facing", "east")]);
+            builder.set(x, 0, 0, "minecraft:stone", &[]);
+        }
+        builder.set(length - 1, 1, 0, "minecraft:barrel", &[("facing", "up")]);
+        builder.set(length - 1, 0, 0, "minecraft:stone", &[]);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_cross_chunk_hopper");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        insert_ready_full_chunk(&world, ChunkPos::new(1, 0));
+
+        let origin = BlockPos::new(2, 2, 2);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert!(
+            origin.offset(length - 1, 1, 0).x() > 16,
+            "the test must actually cross a chunk boundary"
+        );
+
+        set_slot(
+            &world,
+            origin.offset(0, 1, 0),
+            0,
+            ItemStack::with_count(&vanilla_items::STONE, 8),
+        );
+        for _ in 0..400 {
+            tick_test_world(&world, 1, true);
+        }
+
+        let top = count_at(&world, origin.offset(0, 1, 0), 0);
+        let bottom = count_at(&world, origin.offset(length - 1, 1, 0), 0);
+        let mut middle_total = 0;
+        for x in 1..length - 1 {
+            middle_total += count_at(&world, origin.offset(x, 1, 0), 0);
+        }
+        assert_eq!(
+            top + middle_total + bottom,
+            8,
+            "items must be conserved across the chunk boundary (top={top}, middle={middle_total}, bottom={bottom})"
+        );
+        assert!(bottom > 0, "the barrel across the chunk boundary must receive items");
+    }
+
+    #[test]
     fn litematic_observer_detects_piston_and_pulses_lamp() {
         steel_registry::init_vanilla_registry();
         crate::behavior::init_behaviors();
