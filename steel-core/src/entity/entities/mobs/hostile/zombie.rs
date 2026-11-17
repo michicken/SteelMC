@@ -286,12 +286,98 @@ mod tests {
     use std::sync::Arc;
 
     use glam::DVec3;
-    use steel_registry::{init_vanilla_registry, vanilla_entities};
-    use steel_utils::{ChunkPos, Downcast as _};
+    use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+    use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_entities};
+    use steel_utils::{BlockPos, ChunkPos, Downcast as _};
 
     use super::ZombieEntity;
-    use crate::entity::{Entity, LivingEntity, SharedEntity, next_entity_id};
-    use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
+    use crate::entity::{Entity, LivingEntity, Mob, PathfinderMob, SharedEntity, next_entity_id};
+    use crate::test_support::{fresh_test_world, insert_ready_full_chunk, tick_test_world};
+
+    #[test]
+    fn zombie_targets_and_chases_a_player_on_a_flat_platform() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+        let world_fixture = fresh_test_world("zombie_targets_player");
+        let world = &world_fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        for x in 0..20 {
+            for z in 0..16 {
+                world.set_block(
+                    BlockPos::new(x, 64, z),
+                    vanilla_blocks::STONE.default_state(),
+                    steel_utils::types::UpdateFlags::UPDATE_CLIENTS,
+                );
+            }
+        }
+
+        let player = crate::test_support::TestPlayerBuilder::new(
+            Arc::clone(world),
+            "ZombieTarget",
+            7,
+        )
+        .build();
+        player
+            .teleport_to(DVec3::new(14.5, 65.0, 8.5))
+            .expect("player should teleport onto the platform");
+        assert!(world.add_player(player.clone(), crate::player::ResetReason::InitialJoin));
+
+        let zombie: SharedEntity = Arc::new(ZombieEntity::new(
+            &vanilla_entities::ZOMBIE,
+            next_entity_id(),
+            DVec3::new(8.5, 65.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&zombie))
+            .expect("zombie should attach to the loaded chunk");
+        let zombie_entity = zombie
+            .downcast_ref::<ZombieEntity>()
+            .expect("zombie is concrete");
+
+        let start_distance = zombie.position().distance(player.position());
+        assert!(!player.is_spectator(), "test player must not be a spectator");
+        for _ in 0..40 {
+            // World ticks advance game_time, which MeleeAttackGoal gates its
+            // can-use check on; the direct AI step supplies deterministic
+            // movement because the unit-test world may not tick entities.
+            tick_test_world(world, 1, true);
+            zombie_entity.ai_step(&zombie);
+            zombie_entity.base_tick();
+        }
+        assert!(
+            zombie_entity.target().is_some(),
+            "zombie must acquire the nearby player as a target after 40 ticks"
+        );
+        assert!(
+            zombie_entity
+                .create_path_to(player.block_position(), 0)
+                .is_some(),
+            "zombie must be able to path to the player"
+        );
+        assert!(
+            zombie_entity.target().is_some_and(|target| target
+                .as_living_entity()
+                .is_some_and(|living| living.get_health() > 0.0)),
+            "player target must stay alive"
+        );
+        for _ in 0..120 {
+            tick_test_world(world, 1, true);
+            zombie_entity.ai_step(&zombie);
+            zombie_entity.base_tick();
+        }
+        let end_distance = zombie.position().distance(player.position());
+        assert!(
+            end_distance < start_distance - 2.0,
+            "zombie should chase the player: start={start_distance}, end={end_distance}"
+        );
+        assert!(
+            player.get_health() < 20.0,
+            "zombie should reach and hit the player, health={}",
+            player.get_health()
+        );
+    }
 
     #[test]
     fn zombie_entity_type_is_registered_and_spawns_into_world() {
