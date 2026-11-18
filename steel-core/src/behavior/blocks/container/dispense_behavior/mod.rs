@@ -2,9 +2,10 @@ use std::sync::{Arc, LazyLock};
 use steel_registry::data_components::vanilla_components::EQUIPPABLE;
 use steel_registry::item_stack::ItemStack;
 use steel_registry::items::ItemRef;
+use steel_registry::data_components::vanilla_components::ENTITY_DATA;
 use steel_registry::vanilla_entities;
 use steel_registry::vanilla_item_tags::ItemTag;
-use steel_registry::vanilla_items;
+use steel_registry::{vanilla_blocks, vanilla_items};
 use steel_registry::{REGISTRY, RegistryEntry, RegistryExt, TaggedRegistryExt};
 use steel_utils::BlockPos;
 use steel_utils::BlockStateId;
@@ -16,25 +17,31 @@ use crate::world::World;
 
 pub mod armor;
 pub mod arrow;
+pub mod block_place;
 pub mod bucket;
 pub mod consumables;
 pub mod container;
 pub mod default;
+pub mod firework;
 pub mod potion;
 pub mod projectile;
+pub mod spawn_egg;
 pub mod tnt;
 pub mod tools;
 
 pub use armor::ArmorDispenseBehavior;
 pub use arrow::ArrowDispenseBehavior;
+pub use block_place::BlockPlaceDispenseBehavior;
 pub use bucket::{EmptyBucketDispenseBehavior, FilledBucketDispenseBehavior};
 pub use consumables::{
     BoneMealDispenseBehavior, GlowstoneDispenseBehavior, HoneycombDispenseBehavior,
 };
 pub use container::ShulkerBoxDispenseBehavior;
 pub use default::DefaultDispenseBehavior;
+pub use firework::FireworkRocketDispenseBehavior;
 pub use potion::{GlassBottleDispenseBehavior, PotionDispenseBehavior};
 pub use projectile::ProjectileDispenseBehavior;
+pub use spawn_egg::SpawnEggDispenseBehavior;
 pub use tnt::TntDispenseBehavior;
 pub use tools::FlintAndSteelDispenseBehavior;
 
@@ -137,8 +144,18 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         &vanilla_items::GLOWSTONE,
         Box::new(GlowstoneDispenseBehavior),
     );
-    // TODO: carved pumpkin - see consumables.rs
-    // TODO: wither skeleton skull - needs the Wither entity for the summon pattern.
+    registry.set_behavior(
+        &vanilla_items::CARVED_PUMPKIN,
+        Box::new(BlockPlaceDispenseBehavior::new(&vanilla_blocks::CARVED_PUMPKIN)),
+    );
+    // Vanilla also tries to summon the Wither after placing the third skull.
+    // The Wither boss is not implemented yet; the block-placement half is.
+    registry.set_behavior(
+        &vanilla_items::WITHER_SKELETON_SKULL,
+        Box::new(BlockPlaceDispenseBehavior::new(
+            &vanilla_blocks::WITHER_SKELETON_SKULL,
+        )),
+    );
 
     // potion
     registry.set_behavior(
@@ -207,8 +224,27 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         ),
     );
 
-    // TODO: experience bottle, fire charge, wind charge - need their projectile
-    // entities. Firework rocket - entity exists; needs its custom projectile config.
+    registry.set_behavior(
+        &vanilla_items::WIND_CHARGE,
+        Box::new(ProjectileDispenseBehavior::new(
+            &vanilla_entities::WIND_CHARGE,
+            1.1,
+            6.0,
+        )),
+    );
+    registry.set_behavior(
+        &vanilla_items::FIREWORK_ROCKET,
+        Box::new(FireworkRocketDispenseBehavior),
+    );
+    registry.set_behavior(
+        &vanilla_items::EXPERIENCE_BOTTLE,
+        Box::new(ProjectileDispenseBehavior::new(
+            &vanilla_entities::EXPERIENCE_BOTTLE,
+            0.5,
+            1.0,
+        )),
+    );
+    // TODO: fire charge - needs its projectile entity.
 
     registry.set_behavior(&vanilla_items::TNT, Box::new(TntDispenseBehavior));
 
@@ -233,10 +269,13 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
     // MinecartDispenseItemBehavior. Furnace/hopper/tnt/command-block
     // minecarts also need their entities.
 
-    // spawn egg
-    // TODO: spawn eggs with ENTITY_DATA - vanilla resolves these per stack in
-    // DispenserBlock.getDefaultDispenseMethod, which this item-keyed registry
-    // can't express yet.
+    // spawn egg: data-driven by ENTITY_DATA. Match the vanilla item path
+    // instead of component presence so ordinary block items cannot be caught.
+    for (_, item) in REGISTRY.items.iter() {
+        if item.key.path.ends_with("spawn_egg") && item.components.has(ENTITY_DATA) {
+            registry.set_behavior(item, Box::new(SpawnEggDispenseBehavior));
+        }
+    }
     // TODO: armor stand - needs the ArmorStand entity.
 
     registry

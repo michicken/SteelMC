@@ -254,6 +254,15 @@ mod tests {
         // Re-trigger the dispenser from a real neighbor update after seeding the
         // slot so the test does not depend on a later unrelated update.
         let dispenser_pos = origin.offset(1, 1, 1);
+        // Pasting the redstone block can fire the dispenser once before the
+        // slot is seeded, leaving TRIGGERED=true. Clear that latch explicitly
+        // so this assertion tests ejection, not paste-order timing.
+        let dispenser_state = world.get_block_state(dispenser_pos);
+        world.set_block(
+            dispenser_pos,
+            dispenser_state.set_value(&BlockStateProperties::TRIGGERED, false),
+            UpdateFlags::UPDATE_NONE,
+        );
         world.update_neighbors_at(dispenser_pos, &vanilla_blocks::DISPENSER);
         world.run_block_events();
 

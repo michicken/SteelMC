@@ -575,6 +575,99 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_shoots_wind_charge_and_launched_firework() {
+        for (item, entity_type, name) in [
+            (&*vanilla_items::WIND_CHARGE, &vanilla_entities::WIND_CHARGE, "wind_charge"),
+            (&*vanilla_items::FIREWORK_ROCKET, &vanilla_entities::FIREWORK_ROCKET, "firework"),
+            (
+                &*vanilla_items::EXPERIENCE_BOTTLE,
+                &vanilla_entities::EXPERIENCE_BOTTLE,
+                "experience_bottle",
+            ),
+        ] {
+            let fixture = fixture(match name {
+                "wind_charge" => "dispenser_wind_charge",
+                "firework" => "dispenser_firework",
+                _ => "dispenser_experience_bottle",
+            });
+            let state = facing_down(&vanilla_blocks::DISPENSER);
+            place_machine(&fixture.world, state, false);
+            set_slot(&fixture.world, DISPENSER_POS, 0, ItemStack::with_count(item, 2));
+            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+            assert_eq!(
+                entities_in_front(&fixture.world, entity_type),
+                1,
+                "{name} must be spawned as a projectile entity"
+            );
+            assert_eq!(
+                count_at(&fixture.world, DISPENSER_POS, 0),
+                1,
+                "{name} dispense must consume exactly one item"
+            );
+        }
+    }
+
+    #[test]
+    fn dispenser_spawns_entity_from_spawn_egg_entity_data() {
+        let fixture = fixture("dispenser_spawn_egg");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::with_count(&vanilla_items::ZOMBIE_SPAWN_EGG, 2),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::ZOMBIE),
+            1,
+            "spawn egg must resolve its entity type from ENTITY_DATA"
+        );
+        assert_eq!(
+            count_at(&fixture.world, DISPENSER_POS, 0),
+            1,
+            "spawn egg dispense must consume exactly one item"
+        );
+    }
+
+    #[test]
+    fn dispenser_places_carved_pumpkin_and_wither_skeleton_skull() {
+        let pumpkin = fixture("dispenser_carved_pumpkin");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&pumpkin.world, state, false);
+        set_slot(
+            &pumpkin.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::CARVED_PUMPKIN),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &pumpkin.world, DISPENSER_POS);
+        assert_eq!(
+            pumpkin.world.get_block_state(BELOW_POS).get_block(),
+            &vanilla_blocks::CARVED_PUMPKIN,
+            "carved pumpkin must be placed in front"
+        );
+
+        let skull = fixture("dispenser_wither_skull");
+        place_machine(&skull.world, state, false);
+        set_slot(
+            &skull.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::WITHER_SKELETON_SKULL),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &skull.world, DISPENSER_POS);
+        assert_eq!(
+            skull.world.get_block_state(BELOW_POS).get_block(),
+            &vanilla_blocks::WITHER_SKELETON_SKULL,
+            "wither skeleton skull must be placed in front"
+        );
+    }
+
+    #[test]
     fn tree_farm_full_cycle_grows_fells_collects_and_replants() {
         let fixture = fixture("tree_farm_full_cycle");
         let world = &fixture.world;
