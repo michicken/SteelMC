@@ -35,7 +35,7 @@ use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
 use crate::inventory::transfer::insert_stack;
 use crate::world::{SignalGetter as _, World};
 
-const FACING: &EnumProperty<Direction> = &BlockStateProperties::FACING;
+pub(crate) const FACING: &EnumProperty<Direction> = &BlockStateProperties::FACING;
 const TRIGGERED: &BoolProperty = &BlockStateProperties::TRIGGERED;
 
 /// Vanilla dispenser block behavior.
@@ -94,9 +94,6 @@ fn eject_item(world: &Arc<World>, pos: BlockPos, facing: Direction, stack: ItemS
 
 #[derive(Clone, Copy)]
 enum SpecialDispense {
-    Projectile,
-    Tnt,
-    Bucket(BlockStateId),
     Minecart(bool),
     Sapling,
 }
@@ -172,18 +169,7 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
     };
 
     if !dropper {
-        let special = if stack.item == &*vanilla_items::ARROW
-            || stack.item == &*vanilla_items::SNOWBALL
-            || stack.item == &*vanilla_items::EGG
-        {
-            Some(SpecialDispense::Projectile)
-        } else if stack.item == &*vanilla_items::TNT {
-            Some(SpecialDispense::Tnt)
-        } else if stack.item == &*vanilla_items::WATER_BUCKET {
-            Some(SpecialDispense::Bucket(vanilla_blocks::WATER.default_state()))
-        } else if stack.item == &*vanilla_items::LAVA_BUCKET {
-            Some(SpecialDispense::Bucket(vanilla_blocks::LAVA.default_state()))
-        } else if stack.item == &*vanilla_items::MINECART {
+        let special = if stack.item == &*vanilla_items::MINECART {
             Some(SpecialDispense::Minecart(false))
         } else if stack.item == &*vanilla_items::CHEST_MINECART {
             Some(SpecialDispense::Minecart(true))
@@ -197,66 +183,6 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
             drop(guard);
             let front = pos.relative(facing);
             let spawned = match special {
-                SpecialDispense::Projectile => {
-                    let spawn = front.get_center();
-                    let velocity = DVec3::new(
-                        f64::from(facing.offset().0),
-                        f64::from(facing.offset().1),
-                        f64::from(facing.offset().2),
-                    ) * 1.5;
-                    let entity: SharedEntity = if stack.item == &*vanilla_items::ARROW {
-                        let arrow = Arc::new(ArrowEntity::new(
-                            &vanilla_entities::ARROW,
-                            next_entity_id(),
-                            spawn,
-                            Arc::downgrade(world),
-                        ));
-                        arrow.set_velocity(velocity);
-                        arrow
-                    } else if stack.item == &*vanilla_items::SNOWBALL {
-                        let snowball = Arc::new(SnowballEntity::new(
-                            &vanilla_entities::SNOWBALL,
-                            next_entity_id(),
-                            spawn,
-                            Arc::downgrade(world),
-                        ));
-                        snowball.set_velocity(velocity);
-                        snowball
-                    } else {
-                        let egg = Arc::new(ThrownEggEntity::new(
-                            &vanilla_entities::EGG,
-                            next_entity_id(),
-                            spawn,
-                            Arc::downgrade(world),
-                        ));
-                        egg.set_velocity(velocity);
-                        egg
-                    };
-                    world.try_add_entity(entity).is_ok()
-                }
-                SpecialDispense::Tnt => {
-                    let tnt = Arc::new(PrimedTntEntity::primed(
-                        &vanilla_entities::TNT,
-                        next_entity_id(),
-                        front.get_center(),
-                        world,
-                        None,
-                    ));
-                    tnt.set_fuse(PrimedTntEntity::DEFAULT_FUSE_TIME);
-                    world.try_add_entity(tnt).is_ok()
-                }
-                SpecialDispense::Bucket(fluid) => {
-                    if world.get_block_state(front).get_block() == &vanilla_blocks::AIR {
-                        world.set_block(
-                            front,
-                            fluid,
-                            UpdateFlags::UPDATE_CLIENTS | UpdateFlags::UPDATE_NEIGHBORS,
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                }
                 SpecialDispense::Sapling => {
                     let soil = world.get_block_state(front.below()).get_block();
                     if world.get_block_state(front).get_block() == &vanilla_blocks::AIR
@@ -301,8 +227,6 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
                     let remaining = stack.count() - 1;
                     if remaining > 0 {
                         guard.set_item(own_id, slot, stack.copy_with_count(remaining));
-                    } else if matches!(special, SpecialDispense::Bucket(_)) {
-                        guard.set_item(own_id, slot, ItemStack::new(&vanilla_items::BUCKET));
                     } else {
                         guard.remove_item(own_id, slot, stack.count());
                     }
@@ -315,27 +239,20 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
             }
             return;
         }
-    }
 
-    if !dropper && stack.item == &*vanilla_items::BONE_MEAL {
-        // Vanilla consumes one bonemeal per activation when the facing block is
-        // bonemealable, and falls back to ejecting the stack otherwise.
+        // Everything below is the vanilla per-item dispense table, merged from
+        // upstream PR #663 and keyed by item id.
         drop(guard);
-        if crate::behavior::items::BoneMealItem::grow(world, pos.relative(facing)) {
-            if let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) {
-                let remaining = stack.count() - 1;
-                if remaining > 0 {
-                    guard.set_item(own_id, slot, stack.copy_with_count(remaining));
-                } else {
-                    guard.remove_item(own_id, slot, stack.count());
-                }
-            }
-            return;
-        }
+        let behavior =
+            super::dispense_behavior::DISPENSE_BEHAVIORS.get_behavior(stack.item);
+        let remaining = behavior.dispense(world, pos, state, stack.clone());
         if let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) {
-            guard.remove_item(own_id, slot, stack.count());
+            if remaining.is_empty() {
+                guard.remove_item(own_id, slot, stack.count());
+            } else {
+                guard.set_item(own_id, slot, remaining);
+            }
         }
-        eject_item(world, pos, facing, stack);
         return;
     }
 
@@ -487,6 +404,7 @@ mod tests {
         init_vanilla_registry();
         init_behaviors();
         init_block_entities();
+        crate::entity::init_entities();
         let fixture = fresh_test_world(name);
         insert_ready_full_chunk(&fixture.world, ChunkPos::new(0, 0));
         fixture
