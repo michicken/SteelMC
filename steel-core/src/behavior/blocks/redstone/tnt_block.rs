@@ -1,5 +1,6 @@
 //! TNT block behavior and priming entry points.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use steel_macros::block_behavior;
@@ -25,6 +26,31 @@ use crate::player::Player;
 use crate::player::game_mode::can_break;
 use crate::world::game_event::GameEventContext;
 use crate::world::{ClipHitResult, Explosion, SignalGetter as _, World};
+
+thread_local! {
+    /// Set while a moving piston finalizes a TNT block. Vanilla's TNT duper is
+    /// an update-order bug: the moved TNT primes but the original block is not
+    /// removed in that same update. This scope restores that behavior without
+    /// changing normal TNT priming.
+    static TNT_DUPER_SCOPE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` with vanilla TNT-duper update semantics.
+pub(crate) fn with_tnt_duper<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TNT_DUPER_SCOPE.with(|scope| scope.set(false));
+        }
+    }
+    TNT_DUPER_SCOPE.with(|scope| scope.set(true));
+    let _reset = Reset;
+    f()
+}
+
+fn in_tnt_duper_scope() -> bool {
+    TNT_DUPER_SCOPE.with(Cell::get)
+}
 
 /// Vanilla TNT block behavior.
 #[block_behavior]
@@ -125,6 +151,7 @@ impl BlockBehavior for TntBlock {
         if old_state.get_block() != state.get_block()
             && world.has_neighbor_signal(pos)
             && Self::prime(world, pos)
+            && !in_tnt_duper_scope()
         {
             world.remove_block(pos, false);
         }
@@ -138,6 +165,9 @@ impl BlockBehavior for TntBlock {
         _source_block: BlockRef,
         _moved_by_piston: bool,
     ) {
+        if in_tnt_duper_scope() {
+            return;
+        }
         if world.has_neighbor_signal(pos) && Self::prime(world, pos) {
             world.remove_block(pos, false);
         }

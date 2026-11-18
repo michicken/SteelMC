@@ -19,12 +19,13 @@ use steel_utils::{
     locks::SyncMutex,
 };
 
+use crate::behavior::blocks::with_tnt_duper;
 use crate::behavior::{BLOCK_BEHAVIORS, BlockCollisionBoxes, BlockCollisionContext};
 use crate::block_entity::block_state_nbt;
 use crate::block_entity::{BlockEntity, BlockEntityBase, BlockEntityLifecycleExt as _};
 use crate::entity::{Entity, SharedEntity};
 use crate::physics::MoverType;
-use crate::world::{LevelReader, World};
+use crate::world::{LevelReader, SignalGetter as _, World};
 
 const PUSH_OFFSET: f64 = 0.01;
 
@@ -549,12 +550,25 @@ impl PistonMovingState {
         if new_state.try_get_value(&BlockStateProperties::WATERLOGGED) == Some(true) {
             new_state = new_state.set_value(&BlockStateProperties::WATERLOGGED, false);
         }
-        world.set_block(
-            pos,
-            new_state,
-            UpdateFlags::UPDATE_ALL | UpdateFlags::UPDATE_MOVE_BY_PISTON,
-        );
-        world.neighbor_changed(pos, new_state.get_block());
+        let tnt_duper = new_state.get_block() == &vanilla_blocks::TNT
+            && world.has_neighbor_signal(pos);
+        if tnt_duper {
+            with_tnt_duper(|| {
+                world.set_block(
+                    pos,
+                    new_state,
+                    UpdateFlags::UPDATE_ALL | UpdateFlags::UPDATE_MOVE_BY_PISTON,
+                );
+                world.neighbor_changed(pos, new_state.get_block());
+            });
+        } else {
+            world.set_block(
+                pos,
+                new_state,
+                UpdateFlags::UPDATE_ALL | UpdateFlags::UPDATE_MOVE_BY_PISTON,
+            );
+            world.neighbor_changed(pos, new_state.get_block());
+        }
     }
 
     fn finish_movement_early(self, world: &Arc<World>, pos: BlockPos) {
