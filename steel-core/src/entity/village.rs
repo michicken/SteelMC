@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use glam::DVec3;
-use steel_registry::blocks::properties::BlockStateProperties;
-use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
-use steel_utils::{BlockPos, Downcast as _, WorldAabb};
+use steel_registry::blocks::properties::BlockStateProperties;
 use steel_registry::item_stack::ItemStack;
+use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
+use steel_utils::{BlockPos, Downcast as _, WorldAabb};
 
 use crate::entity::entities::IronGolemEntity;
 use crate::entity::{Entity, SharedEntity, next_entity_id};
@@ -27,27 +27,62 @@ pub const MIN_BEDS: usize = 3;
 pub const MIN_WORKSTATIONS: usize = 3;
 
 /// Counts beds and workstations in a horizontal band around `center`.
+///
+/// Uses the world's real POI storage (the same store vanilla uses for
+/// village metadata) instead of scanning every block in the area.
 #[must_use]
 pub fn count_village_pois(world: &World, center: BlockPos) -> (usize, usize) {
+    use steel_registry::{REGISTRY, RegistryExt as _};
+
+    fn path_of(id: usize) -> &'static str {
+        REGISTRY
+            .poi_types
+            .by_id(id)
+            .map_or("", |poi| poi.key.path.as_ref())
+    }
+
+    fn is_home(id: usize) -> bool {
+        path_of(id) == "home"
+    }
+
+    fn is_workstation(id: usize) -> bool {
+        matches!(
+            path_of(id),
+            "armorer"
+                | "butcher"
+                | "cartographer"
+                | "cleric"
+                | "farmer"
+                | "fisherman"
+                | "fletcher"
+                | "leatherworker"
+                | "librarian"
+                | "mason"
+                | "shepherd"
+                | "toolsmith"
+                | "weaponsmith"
+        )
+    }
+
+    let storage = world.poi_storage.lock();
+    let pois = storage.get_in_horizontal_square(
+        &|id| is_home(id) || is_workstation(id),
+        center,
+        VILLAGE_POI_RADIUS,
+        crate::poi::OccupationStatus::Any,
+    );
     let mut beds = 0;
     let mut workstations = 0;
-    for x in -VILLAGE_POI_RADIUS..=VILLAGE_POI_RADIUS {
-        for z in -VILLAGE_POI_RADIUS..=VILLAGE_POI_RADIUS {
-            for y in -2..=2 {
-                let pos = center.offset(x, y, z);
-                let block = world.get_block_state(pos).get_block();
-                let path = block.key.path.as_ref();
-                if path.ends_with("_bed") {
-                    beds += 1;
-                } else if matches!(
-                    path,
-                    "composter" | "lectern" | "barrel" | "cauldron" | "furnace"
-                        | "smithing_table" | "stonecutter" | "loom" | "cartography_table"
-                        | "fletching_table" | "brewing_stand"
-                ) {
-                    workstations += 1;
-                }
-            }
+    for (pos, id) in pois {
+        // Village POIs are counted in the same horizontal band the vanilla
+        // village manager uses; ignore beds on other floors.
+        if (pos.y() - center.y()).abs() > 2 {
+            continue;
+        }
+        if is_home(id) {
+            beds += 1;
+        } else {
+            workstations += 1;
         }
     }
     (beds, workstations)
@@ -89,10 +124,7 @@ pub fn try_spawn_iron_golem(world: &Arc<World>, center: BlockPos) -> Option<Shar
     }
     let villagers = nearby_villagers(world, center, f64::from(VILLAGE_POI_RADIUS));
     let (beds, workstations) = count_village_pois(world, center);
-    if villagers.len() < MIN_VILLAGERS
-        || beds < MIN_BEDS
-        || workstations < MIN_WORKSTATIONS
-    {
+    if villagers.len() < MIN_VILLAGERS || beds < MIN_BEDS || workstations < MIN_WORKSTATIONS {
         return None;
     }
 
@@ -111,6 +143,61 @@ pub fn try_spawn_iron_golem(world: &Arc<World>, center: BlockPos) -> Option<Shar
     Some(golem)
 }
 
+/// Harvests mature wheat within `radius` of `center` and replants it.
+///
+/// Returns `(harvested, replanted)` counts. Drops are real item entities so
+/// hoppers can collect them.
+pub fn harvest_mature_wheat_near(
+    world: &Arc<World>,
+    center: BlockPos,
+    radius: i32,
+) -> (usize, usize) {
+    let mut harvested = 0;
+    let mut replanted = 0;
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            for dy in -1..=1 {
+                let pos = center.offset(dx, dy, dz);
+                let state = world.get_block_state(pos);
+                if state.get_block() != &vanilla_blocks::WHEAT {
+                    continue;
+                }
+                if state.get_value(&BlockStateProperties::AGE_7) < 7 {
+                    continue;
+                }
+                world.set_block(
+                    pos,
+                    vanilla_blocks::AIR.default_state(),
+                    steel_utils::types::UpdateFlags::UPDATE_ALL,
+                );
+                world.spawn_item(
+                    glam::DVec3::new(
+                        f64::from(pos.x()) + 0.5,
+                        f64::from(pos.y()) + 0.5,
+                        f64::from(pos.z()) + 0.5,
+                    ),
+                    ItemStack::new(&vanilla_items::WHEAT),
+                );
+                world.spawn_item(
+                    glam::DVec3::new(
+                        f64::from(pos.x()) + 0.5,
+                        f64::from(pos.y()) + 0.5,
+                        f64::from(pos.z()) + 0.5,
+                    ),
+                    ItemStack::new(&vanilla_items::WHEAT_SEEDS),
+                );
+                world.set_block(
+                    pos,
+                    vanilla_blocks::WHEAT.default_state(),
+                    steel_utils::types::UpdateFlags::UPDATE_ALL,
+                );
+                harvested += 1;
+                replanted += 1;
+            }
+        }
+    }
+    (harvested, replanted)
+}
 
 /// Harvests mature wheat within four blocks of each village and replants it.
 ///
@@ -122,45 +209,9 @@ pub fn tick_village_crop_farm(world: &Arc<World>, center: BlockPos) -> (usize, u
     let mut harvested = 0;
     let mut replanted = 0;
     for villager in villagers {
-        let base = villager.block_position();
-        for dx in -4..=4 {
-            for dz in -4..=4 {
-                for dy in -1..=1 {
-                    let pos = base.offset(dx, dy, dz);
-                    let state = world.get_block_state(pos);
-                    if state.get_block() != &vanilla_blocks::WHEAT {
-                        continue;
-                    }
-                    if state.get_value(&BlockStateProperties::AGE_7) < 7 {
-                        continue;
-                    }
-                    world.set_block(pos, vanilla_blocks::AIR.default_state(), steel_utils::types::UpdateFlags::UPDATE_ALL);
-                    world.spawn_item(
-                        glam::DVec3::new(
-                            f64::from(pos.x()) + 0.5,
-                            f64::from(pos.y()) + 0.5,
-                            f64::from(pos.z()) + 0.5,
-                        ),
-                        ItemStack::new(&vanilla_items::WHEAT),
-                    );
-                    world.spawn_item(
-                        glam::DVec3::new(
-                            f64::from(pos.x()) + 0.5,
-                            f64::from(pos.y()) + 0.5,
-                            f64::from(pos.z()) + 0.5,
-                        ),
-                        ItemStack::new(&vanilla_items::WHEAT_SEEDS),
-                    );
-                    world.set_block(
-                        pos,
-                        vanilla_blocks::WHEAT.default_state(),
-                        steel_utils::types::UpdateFlags::UPDATE_ALL,
-                    );
-                    harvested += 1;
-                    replanted += 1;
-                }
-            }
-        }
+        let (h, r) = harvest_mature_wheat_near(world, villager.block_position(), 4);
+        harvested += h;
+        replanted += r;
     }
     (harvested, replanted)
 }
@@ -170,12 +221,13 @@ mod tests {
     use std::sync::Arc;
 
     use glam::DVec3;
-    use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_entities};
     use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+    use steel_registry::blocks::properties::{BedPart, BlockStateProperties};
+    use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_entities};
     use steel_utils::types::UpdateFlags;
     use steel_utils::{ChunkPos, Downcast as _};
 
-    use super::{try_spawn_iron_golem, MIN_VILLAGERS};
+    use super::{MIN_VILLAGERS, try_spawn_iron_golem};
     use crate::entity::entities::{IronGolemEntity, VillagerEntity};
     use crate::entity::{Entity, LivingEntity, SharedEntity, next_entity_id};
     use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
@@ -202,20 +254,20 @@ mod tests {
                 .expect("villager must attach");
         }
         for (x, z) in [(8, 10), (10, 10), (12, 10)] {
-            world
-                .set_block(
-                    steel_utils::BlockPos::new(x, 64, z),
-                    vanilla_blocks::WHITE_BED.default_state(),
-                    UpdateFlags::UPDATE_ALL,
-                );
+            world.set_block(
+                steel_utils::BlockPos::new(x, 64, z),
+                vanilla_blocks::WHITE_BED
+                    .default_state()
+                    .set_value(&BlockStateProperties::BED_PART, BedPart::Head),
+                UpdateFlags::UPDATE_ALL,
+            );
         }
         for (x, z) in [(8, 6), (10, 6), (12, 6)] {
-            world
-                .set_block(
-                    steel_utils::BlockPos::new(x, 64, z),
-                    vanilla_blocks::COMPOSTER.default_state(),
-                    UpdateFlags::UPDATE_ALL,
-                );
+            world.set_block(
+                steel_utils::BlockPos::new(x, 64, z),
+                vanilla_blocks::COMPOSTER.default_state(),
+                UpdateFlags::UPDATE_ALL,
+            );
         }
 
         let golem = try_spawn_iron_golem(world, steel_utils::BlockPos::new(10, 64, 8))
@@ -240,12 +292,13 @@ mod tests {
                 .expect("villager must attach");
         }
         for (x, z) in [(8, 10), (10, 10)] {
-            world
-                .set_block(
-                    steel_utils::BlockPos::new(x, 64, z),
-                    vanilla_blocks::WHITE_BED.default_state(),
-                    UpdateFlags::UPDATE_ALL,
-                );
+            world.set_block(
+                steel_utils::BlockPos::new(x, 64, z),
+                vanilla_blocks::WHITE_BED
+                    .default_state()
+                    .set_value(&BlockStateProperties::BED_PART, BedPart::Head),
+                UpdateFlags::UPDATE_ALL,
+            );
         }
         assert!(
             try_spawn_iron_golem(world, steel_utils::BlockPos::new(9, 64, 8)).is_none(),
@@ -270,9 +323,10 @@ mod tests {
         );
         world.set_block(
             steel_utils::BlockPos::new(10, 64, 8),
-            vanilla_blocks::WHEAT
-                .default_state()
-                .set_value(&steel_registry::blocks::properties::BlockStateProperties::AGE_7, 7),
+            vanilla_blocks::WHEAT.default_state().set_value(
+                &steel_registry::blocks::properties::BlockStateProperties::AGE_7,
+                7,
+            ),
             UpdateFlags::UPDATE_ALL,
         );
         let (harvested, replanted) =

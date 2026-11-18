@@ -38,6 +38,7 @@ use codegen::write_tokens_if_changed;
 mod structure_processor_data;
 
 mod attributes;
+mod activities;
 mod banner_patterns;
 mod biomes;
 mod block_entity_types;
@@ -103,6 +104,7 @@ mod tags;
 
 const ADVANCEMENTS: &str = "advancements";
 const ATTRIBUTES: &str = "attributes";
+const ACTIVITIES: &str = "activities";
 const BLOCKS: &str = "blocks";
 const BLOCK_TAGS: &str = "block_tags";
 const ITEMS: &str = "items";
@@ -197,6 +199,7 @@ pub fn main() {
 
     let vanilla_builds = [
         (attributes::build(), ATTRIBUTES),
+        (activities::build(), ACTIVITIES),
         (blocks::build(), BLOCKS),
         (tags::block(), BLOCK_TAGS),
         (items::build(), ITEMS),

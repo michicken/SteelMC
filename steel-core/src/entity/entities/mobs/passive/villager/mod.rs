@@ -1,5 +1,7 @@
 use std::sync::Weak;
 
+mod brain;
+
 use glam::DVec3;
 use rand::Rng;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
@@ -38,6 +40,7 @@ pub struct VillagerEntity {
     mob_base: MobBase,
     entity_data: SyncMutex<VillagerEntityData>,
     village_ticks: SyncMutex<i32>,
+    brain: SyncMutex<crate::entity::ai::brain::container::Brain>,
 }
 
 // SAFETY: The owner-scoped type key uniquely identifies VillagerEntity.
@@ -92,6 +95,7 @@ impl VillagerEntity {
             mob_base,
             entity_data: SyncMutex::new(entity_data),
             village_ticks: SyncMutex::new(0),
+            brain: brain::new_villager_brain(),
         }
     }
 
@@ -199,21 +203,24 @@ impl LivingEntity for VillagerEntity {
         Some(&sound_events::ENTITY_VILLAGER_DEATH)
     }
 
-
     fn server_ai_step(&self, entity: &SharedEntity) {
         Mob::mob_server_ai_step(self, entity);
     }
 
     fn ai_step(&self, entity: &SharedEntity) -> Option<MoveResult> {
         let result = Mob::mob_ai_step(self, entity);
+        if let Some(world) = self.level()
+            && let Some(mob) = entity.as_pathfinder_mob()
+        {
+            let time = world.game_time();
+            self.brain.lock().tick(mob, &world, time);
+        }
         let due = {
             let mut ticks = self.village_ticks.lock();
             *ticks = ticks.wrapping_add(1);
             *ticks % 200 == 0
         };
-        if due
-            && let Some(world) = self.level()
-        {
+        if due && let Some(world) = self.level() {
             let center = self.block_position();
             crate::entity::village::tick_village_crop_farm(&world, center);
             crate::entity::village::try_spawn_iron_golem(&world, center);
@@ -250,13 +257,12 @@ impl Mob for VillagerEntity {
 
 impl PathfinderMob for VillagerEntity {}
 
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use glam::DVec3;
-    use steel_registry::{init_vanilla_registry, vanilla_entities, vanilla_attributes};
+    use steel_registry::{init_vanilla_registry, vanilla_attributes, vanilla_entities};
     use steel_utils::{ChunkPos, Downcast as _};
 
     use super::VillagerEntity;
