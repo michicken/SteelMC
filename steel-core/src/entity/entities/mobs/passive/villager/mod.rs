@@ -2,6 +2,7 @@ use std::sync::Weak;
 
 mod brain;
 mod merchant;
+mod trade_table;
 
 pub use merchant::{MerchantOffer, TradeError, TradeOutcome, level_for_xp};
 
@@ -147,9 +148,10 @@ impl VillagerEntity {
             .ok()
             .and_then(|id| REGISTRY.villager_professions.by_id(id))
             .map(|profession| profession.key.path.to_string());
+        let level = self.villager_level();
         let offers = path
             .as_deref()
-            .map_or_else(Vec::new, merchant::level_one_offers);
+            .map_or_else(Vec::new, |path| merchant::offers_for_level(path, level));
         *self.offers.lock() = offers;
     }
 
@@ -183,7 +185,10 @@ impl VillagerEntity {
         let mut villager_data = data.villager_data.get().clone();
         if villager_data.level != level {
             villager_data.level = level;
+            let profession = villager_data.profession;
             data.villager_data.set(villager_data);
+            drop(data);
+            self.refresh_trade_offers(profession);
         }
     }
 

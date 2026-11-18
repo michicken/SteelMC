@@ -58,6 +58,21 @@ const fn offer(wants: Vec<ItemStack>, gives: ItemStack, max_uses: i32, xp: i32) 
     }
 }
 
+/// Builds all vanilla offers unlocked at `level` for a profession key.
+///
+/// Level 1 is the hand-written exact table; levels 2-5 are appended from the
+/// generated vanilla `villager_trade` data. Offers whose output is produced by
+/// a dynamic item modifier (e.g. random enchanted books) are intentionally
+/// omitted because they are not exact stacks.
+#[must_use]
+pub fn offers_for_level(path: &str, level: i32) -> Vec<MerchantOffer> {
+    let mut offers = level_one_offers(path);
+    if level > 1 {
+        super::trade_table::append_level_offers(path, level, &mut offers);
+    }
+    offers
+}
+
 /// Builds the vanilla level-1 offer list for a profession key.
 ///
 /// `path` is the profession registry path (`farmer`, `librarian`, ...).
@@ -422,7 +437,7 @@ mod tests {
 
     use steel_registry::{init_vanilla_registry, item_stack::ItemStack, vanilla_items};
 
-    use super::{TradeError, execute_trade, level_for_xp, level_one_offers};
+    use super::{TradeError, execute_trade, level_for_xp, level_one_offers, offers_for_level};
 
     #[test]
     fn farmer_offer_table_matches_vanilla_level_one() {
@@ -443,6 +458,25 @@ mod tests {
         assert_eq!(level_for_xp(10), 3);
         assert_eq!(level_for_xp(30), 4);
         assert_eq!(level_for_xp(70), 5);
+    }
+
+    #[test]
+    fn farmer_level_two_unlocks_vanilla_sixteen_xp_offers() {
+        steel_registry::init_vanilla_registry();
+        let level_one = level_one_offers("farmer");
+        let level_two = offers_for_level("farmer", 2);
+        assert!(
+            level_two.len() > level_one.len(),
+            "level 2 must append the vanilla farmer offers"
+        );
+        assert!(
+            level_two.iter().any(|offer| {
+                offer.gives.is(&vanilla_items::APPLE)
+                    && offer.gives.count() == 4
+                    && offer.wants.iter().any(|want| want.is(&vanilla_items::EMERALD))
+            }),
+            "farmer level 2 must include 1 emerald -> 4 apples"
+        );
     }
 
     #[test]
