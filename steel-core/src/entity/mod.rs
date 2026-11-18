@@ -753,6 +753,7 @@ fn apply_effects_from_block_movements(entity: &dyn Entity, movements: &[EntityMo
 mod ageable;
 pub(crate) mod ai;
 mod animal;
+pub mod village;
 pub mod attribute;
 mod base;
 mod block_attached_entity;
