@@ -16,9 +16,9 @@ mod tests {
     use steel_registry::blocks::block_state_ext::BlockStateExt as _;
     use steel_registry::blocks::properties::{BlockStateProperties, Direction};
     use steel_registry::item_stack::ItemStack;
-    use steel_registry::{vanilla_blocks, vanilla_items};
+    use steel_registry::{vanilla_blocks, vanilla_game_rules, vanilla_items};
     use steel_utils::types::UpdateFlags;
-    use steel_utils::{BlockPos, ChunkPos, Identifier};
+    use steel_utils::{BlockPos, ChunkPos, Identifier, WorldAabb};
 
     use crate::behavior::block::BlockBehavior as _;
     use crate::behavior::blocks::container::dispenser_block::DispenserBlock;
@@ -1680,4 +1680,183 @@ mod tests {
         }
     }
 
+
+
+    fn place_engine(
+        world: &Arc<crate::world::World>,
+        origin: BlockPos,
+        dir: Direction,
+    ) -> (BlockPos, BlockPos) {
+        let sign = if dir == Direction::East { 1 } else { -1 };
+        let piston_forward = vanilla_blocks::STICKY_PISTON
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, dir)
+            .set_value(&BlockStateProperties::EXTENDED, false);
+        let piston_backward = vanilla_blocks::STICKY_PISTON
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, dir.opposite())
+            .set_value(&BlockStateProperties::EXTENDED, false);
+        let observer_forward = vanilla_blocks::OBSERVER
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, dir);
+        let observer_backward = vanilla_blocks::OBSERVER
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, dir.opposite());
+        let a = BlockPos::new(origin.x(), origin.y(), origin.z());
+        let b = BlockPos::new(origin.x() + sign, origin.y(), origin.z());
+        let c = BlockPos::new(origin.x() + sign * 2, origin.y(), origin.z());
+        let d = BlockPos::new(origin.x(), origin.y(), origin.z() + 1);
+        let e = BlockPos::new(origin.x() + sign, origin.y(), origin.z() + 1);
+        let f = BlockPos::new(origin.x() + sign * 2, origin.y(), origin.z() + 1);
+        world.set_block(a, vanilla_blocks::SLIME_BLOCK.default_state(), UpdateFlags::UPDATE_NONE);
+        world.set_block(b, observer_forward, UpdateFlags::UPDATE_NONE);
+        world.set_block(c, piston_backward, UpdateFlags::UPDATE_NONE);
+        world.set_block(d, piston_forward, UpdateFlags::UPDATE_NONE);
+        world.set_block(e, observer_backward, UpdateFlags::UPDATE_NONE);
+        world.set_block(f, vanilla_blocks::SLIME_BLOCK.default_state(), UpdateFlags::UPDATE_NONE);
+        (b, e)
+    }
+    #[test]
+    fn world_eater_tnt_clears_the_wall_and_return_engine_flies_west() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let test_world = fresh_test_world("world_eater_full_machine");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        for cx in 0..=2 {
+            insert_ready_full_chunk(&world, ChunkPos::new(cx, 0));
+        }
+        assert!(world.set_game_rule(&vanilla_game_rules::TNT_EXPLODES, true));
+        assert!(world.set_game_rule(&vanilla_game_rules::MOB_GRIEFING, true));
+
+        // Stone wall in the sweep path, backed by obsidian so the machine
+        // cannot simply shove the wall along.
+        for y in 64..=66 {
+            for z in 8..=9 {
+                world.set_block(
+                    BlockPos::new(16, y, z),
+                    vanilla_blocks::STONE.default_state(),
+                    UpdateFlags::UPDATE_NONE,
+                );
+                world.set_block(
+                    BlockPos::new(18, y, z),
+                    vanilla_blocks::BEDROCK.default_state(),
+                    UpdateFlags::UPDATE_NONE,
+                );
+            }
+        }
+        // Real TNT charge in front of the stone wall, primed by a redstone block.
+        let tnt_pos = BlockPos::new(15, 64, 8);
+        for z in [8, 9] {
+            world.set_block(
+                BlockPos::new(15, 63, z),
+                vanilla_blocks::STONE.default_state(),
+                UpdateFlags::UPDATE_NONE,
+            );
+            world.set_block(
+                BlockPos::new(15, 64, z),
+                vanilla_blocks::TNT.default_state(),
+                UpdateFlags::UPDATE_NONE,
+            );
+        }
+        world.set_block(
+            BlockPos::new(14, 64, 8),
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+        world.set_block(
+            BlockPos::new(14, 64, 9),
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+        assert!(world.get_block_state(tnt_pos).is_air(), "TNT must prime when the charge is powered");
+        for _ in 0..160 {
+            for entity in world.get_entities_in_aabb(&WorldAabb::new(14.0, 55.0, 7.0, 19.0, 66.0, 10.0)) {
+                Arc::clone(&entity).tick();
+            }
+            tick_test_world(&world, 1, true);
+        }
+        for z in [8, 9] {
+            assert!(
+                world.get_block_state(BlockPos::new(16, 64, z)).is_air(),
+                "TNT must blow a hole through the stone wall at z={z}"
+            );
+            assert!(
+                world.get_block_state(BlockPos::new(17, 64, z)).is_air(),
+                "the blast must clear the machine path at z={z}"
+            );
+        }
+
+        // The redstone blocks that primed the charge are debris in the path.
+        for z in [8, 9] {
+            world.remove_block(BlockPos::new(14, 64, z), false);
+        }
+
+        // Build the engine only after the blast, so the explosion's neighbor
+        // updates cannot pre-start or deform it.
+        let origin = BlockPos::new(8, 64, 8);
+        let dir = Direction::West; // this engine travels east.
+        let (b, e) = place_engine(&world, origin, dir);
+        world.run_block_events();
+        let mut farthest_east = 0;
+        for _ in 0..240 {
+            tick_test_world(&world, 1, true);
+            tick_block_entities(&world, 3);
+            world.run_block_events();
+            for step in 0..=10 {
+                let x = origin.x() + step;
+                if (0..=1).any(|dz| {
+                    world
+                        .get_block_state(BlockPos::new(x, origin.y(), origin.z() + dz))
+                        .get_block()
+                        == &vanilla_blocks::STICKY_PISTON
+                }) {
+                    farthest_east = farthest_east.max(step);
+                }
+            }
+        }
+        assert!(
+            farthest_east >= 8,
+            "the world eater must fly through the blasted wall and stop only at obsidian (max step {farthest_east})"
+        );
+
+        // Return leg: the mirrored engine is a real self-propelled machine
+        // and must fly west after its observer is kicked.
+        let return_origin = BlockPos::new(30, 70, 8);
+        let return_dir = Direction::East; // this engine travels west.
+        let return_sign = 1;
+        let rb = BlockPos::new(return_origin.x() + return_sign, return_origin.y(), return_origin.z());
+        let re = BlockPos::new(return_origin.x() + return_sign, return_origin.y(), return_origin.z() + 1);
+        world.set_block(return_origin, vanilla_blocks::SLIME_BLOCK.default_state(), UpdateFlags::UPDATE_NONE);
+        world.set_block(rb, vanilla_blocks::OBSERVER.default_state().set_value(&BlockStateProperties::FACING, return_dir), UpdateFlags::UPDATE_NONE);
+        world.set_block(BlockPos::new(return_origin.x() + 2, return_origin.y(), return_origin.z()), vanilla_blocks::STICKY_PISTON.default_state().set_value(&BlockStateProperties::FACING, return_dir.opposite()).set_value(&BlockStateProperties::EXTENDED, false), UpdateFlags::UPDATE_NONE);
+        world.set_block(BlockPos::new(return_origin.x(), return_origin.y(), return_origin.z() + 1), vanilla_blocks::STICKY_PISTON.default_state().set_value(&BlockStateProperties::FACING, return_dir).set_value(&BlockStateProperties::EXTENDED, false), UpdateFlags::UPDATE_NONE);
+        world.set_block(re, vanilla_blocks::OBSERVER.default_state().set_value(&BlockStateProperties::FACING, return_dir.opposite()), UpdateFlags::UPDATE_NONE);
+        world.set_block(BlockPos::new(return_origin.x() + 2, return_origin.y(), return_origin.z() + 1), vanilla_blocks::SLIME_BLOCK.default_state(), UpdateFlags::UPDATE_NONE);
+        world.update_neighbors_at(rb, &vanilla_blocks::OBSERVER);
+        world.update_neighbors_at(re, &vanilla_blocks::OBSERVER);
+        world.run_block_events();
+        let mut farthest_west = 0;
+        for _ in 0..200 {
+            tick_test_world(&world, 1, true);
+            tick_block_entities(&world, 3);
+            world.run_block_events();
+            for step in 1..=12 {
+                let x = return_origin.x() - step;
+                if (0..=1).any(|dz| {
+                    world
+                        .get_block_state(BlockPos::new(x, return_origin.y(), return_origin.z() + dz))
+                        .get_block()
+                        == &vanilla_blocks::STICKY_PISTON
+                }) {
+                    farthest_west = farthest_west.max(step);
+                }
+            }
+        }
+        assert!(
+            farthest_west >= 6,
+            "the return engine must fly west (max step {farthest_west})"
+        );
+    }
 }
