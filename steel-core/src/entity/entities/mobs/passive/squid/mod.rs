@@ -491,10 +491,11 @@ impl Mob for SquidEntity {
     fn finalize_spawn(
         &self,
         world: &Arc<World>,
+        difficulty: crate::world::DifficultyInstance,
         spawn_reason: EntitySpawnReason,
         group_data: Option<SpawnGroupData>,
     ) -> Option<SpawnGroupData> {
-        self.finalize_spawn_ageable_mob(world, spawn_reason, group_data)
+        self.finalize_spawn_ageable_mob(world, difficulty, spawn_reason, group_data)
     }
 }
 
