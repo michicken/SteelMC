@@ -1086,6 +1086,58 @@ mod tests {
     }
 
     #[test]
+    fn vanilla_village_placement_matches_natural_chunk_density() {
+        use std::panic;
+        use std::thread;
+
+        let result = thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(vanilla_village_placement_matches_natural_chunk_density_inner)
+            .expect("Failed to spawn test thread")
+            .join();
+        if let Err(payload) = result {
+            panic::resume_unwind(payload);
+        }
+    }
+
+    fn vanilla_village_placement_matches_natural_chunk_density_inner() {
+        init_vanilla_registry();
+        let biome_provider = BiomeSourceKind::fixed(&vanilla_biomes::PLAINS);
+        let thread_pool = rayon::ThreadPoolBuilder::default()
+            .build()
+            .expect("Couldn't create a new thread pool.");
+        let generator = StructureGenerator::vanilla_with_structure_sets(
+            20_261_118,
+            None,
+            &biome_provider,
+            load_vanilla_structure_sets(),
+            &thread_pool,
+        );
+        let village_key = Identifier::vanilla_static("villages");
+        let mut candidates = 0;
+
+        // Vanilla villages use spacing 34 / separation 8. A 128x128 chunk
+        // window therefore contains roughly (128/34)^2 = 14 candidate chunks.
+        for chunk_x in -64..64 {
+            for chunk_z in -64..64 {
+                if generator.is_structure_chunk_for_set(
+                    &village_key,
+                    chunk_x,
+                    chunk_z,
+                    &mut Vec::new(),
+                ) {
+                    candidates += 1;
+                }
+            }
+        }
+
+        assert!(
+            (4..=32).contains(&candidates),
+            "vanilla village placement should average about 14 candidates in 128x128 chunks, got {candidates}"
+        );
+    }
+
+    #[test]
     fn vanilla_assets_cover_vanilla_structure_sets() {
         use std::panic;
         use std::thread;
