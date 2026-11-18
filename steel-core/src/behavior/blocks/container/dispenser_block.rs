@@ -455,6 +455,16 @@ mod tests {
             .count()
     }
 
+    fn slot_item(world: &Arc<World>, pos: BlockPos, slot: usize) -> steel_registry::items::ItemRef {
+        let container = container_at(world, pos);
+        let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+        guard
+            .get(container.container_id())
+            .expect("container")
+            .get_item(slot)
+            .item
+    }
+
     fn set_slot(world: &Arc<World>, pos: BlockPos, slot: usize, stack: ItemStack) {
         let container = container_at(world, pos);
         let mut guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
@@ -1189,6 +1199,33 @@ mod tests {
             "armor stand item must spawn a real armor_stand entity"
         );
         assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
+    }
+
+    #[test]
+    fn dispenser_releases_axolotl_bucket_as_real_entity_and_returns_bucket() {
+        let fixture = fixture("dispenser_axolotl_bucket");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::AXOLOTL_BUCKET),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::AXOLOTL),
+            1,
+            "axolotl bucket must release a real axolotl entity"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 1);
+        assert_eq!(
+            slot_item(&fixture.world, DISPENSER_POS, 0),
+            &*vanilla_items::BUCKET,
+            "the bucket must be left behind as an empty bucket"
+        );
     }
 
     #[test]

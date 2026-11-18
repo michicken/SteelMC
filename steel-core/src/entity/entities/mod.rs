@@ -6,6 +6,9 @@ pub mod objects;
 pub use mobs::ambient::BatEntity;
 pub use mobs::hostile::{EndermiteEntity, SkeletonEntity, SpiderEntity, ZombieEntity};
 pub use mobs::passive::*;
+pub use objects::aquatic::{
+    AxolotlEntity, CodEntity, PufferfishEntity, SalmonEntity, TadpoleEntity, TropicalFishEntity,
+};
 pub use objects::armor::ArmorStandEntity;
 pub use objects::display_ui::{BlockDisplayEntity, ItemFrameEntity, LeashFenceKnotEntity};
 pub use objects::effects::AreaEffectCloudEntity;

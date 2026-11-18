@@ -17,6 +17,7 @@ use crate::world::World;
 
 pub mod armor;
 use entity::SpawnEntityDispenseBehavior;
+use mob_bucket::MobBucketDispenseBehavior;
 pub mod arrow;
 pub mod block_place;
 pub mod bucket;
@@ -24,6 +25,7 @@ pub mod consumables;
 pub mod container;
 pub mod default;
 pub mod entity;
+pub mod mob_bucket;
 pub mod firework;
 pub mod potion;
 pub mod projectile;
@@ -136,10 +138,17 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         &vanilla_items::BUCKET,
         Box::new(EmptyBucketDispenseBehavior),
     );
-    // TODO: mob buckets (salmon, cod, pufferfish, tropical fish, axolotl,
-    // sulfur cube, tadpole) — vanilla empties them into a mob
-    // entity at the target block, but none of those entities/spawn paths
-    // are ported yet. Currently fall through to DefaultDispenseBehavior.
+    // mob buckets: spawn the captured entity and leave an empty bucket.
+    for item in [
+        &vanilla_items::AXOLOTL_BUCKET,
+        &vanilla_items::COD_BUCKET,
+        &vanilla_items::SALMON_BUCKET,
+        &vanilla_items::PUFFERFISH_BUCKET,
+        &vanilla_items::TROPICAL_FISH_BUCKET,
+        &vanilla_items::TADPOLE_BUCKET,
+    ] {
+        registry.set_behavior(item, Box::new(MobBucketDispenseBehavior));
+    }
 
     // consumables
     registry.set_behavior(
