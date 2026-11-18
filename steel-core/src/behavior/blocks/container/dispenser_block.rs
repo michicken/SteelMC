@@ -1229,6 +1229,32 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_releases_sulfur_cube_bucket_and_returns_bucket() {
+        let fixture = fixture("dispenser_sulfur_bucket");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::SULFUR_CUBE_BUCKET),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::SULFUR_CUBE),
+            1,
+            "sulfur cube bucket must release a real sulfur cube"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 1);
+        assert_eq!(
+            slot_item(&fixture.world, DISPENSER_POS, 0),
+            &*vanilla_items::BUCKET
+        );
+    }
+
+    #[test]
     fn dropper_moves_whole_stack_into_container_below() {
         let fixture = fixture("dropper_transfer");
         let state = facing_down(&vanilla_blocks::DROPPER);

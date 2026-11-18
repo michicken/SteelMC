@@ -146,6 +146,7 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         &vanilla_items::PUFFERFISH_BUCKET,
         &vanilla_items::TROPICAL_FISH_BUCKET,
         &vanilla_items::TADPOLE_BUCKET,
+        &vanilla_items::SULFUR_CUBE_BUCKET,
     ] {
         registry.set_behavior(item, Box::new(MobBucketDispenseBehavior));
     }

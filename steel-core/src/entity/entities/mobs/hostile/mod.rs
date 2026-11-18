@@ -6,6 +6,7 @@
 pub mod endermite;
 pub mod skeleton;
 pub mod spider;
+pub mod sulfur_cube;
 pub mod zombie;
 pub use endermite::EndermiteEntity;
 pub use skeleton::SkeletonEntity;
