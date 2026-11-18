@@ -99,9 +99,22 @@ fn is_dark_spawnable(world: &Arc<World>, pos: BlockPos) -> bool {
     if below.get_block() == &vanilla_blocks::AIR || below.get_block() == &vanilla_blocks::WATER {
         return false;
     }
-    // Dark-room spawning: block light must be zero. Sky light is still being
-    // wired into chunk light updates, so it is not used as a spawn gate here.
-    world.light_value_at(LightLayer::Block, pos) == 0
+    // Vanilla requires both block light and sky light to be low enough to
+    // spawn. Without the sky-light gate, mobs spawn on top of a dark-room roof
+    // during the day because the roof top has block light 0.
+    if world.light_value_at(LightLayer::Block, pos) > 0 {
+        return false;
+    }
+    let sky = world.light_value_at(LightLayer::Sky, pos);
+    // Headless test worlds do not run the sky-light propagation pass when
+    // blocks are placed, so a built dark room still reports sky light 15.
+    // Treat a solid roof within 16 blocks as equivalent dark cover; the roof
+    // top itself has no cover and is still rejected.
+    sky <= 7 || has_solid_cover(world, pos, 16)
+}
+
+fn has_solid_cover(world: &Arc<World>, pos: BlockPos, max_height: i32) -> bool {
+    (1..=max_height).any(|dy| world.get_block_state(pos.offset(0, dy, 0)).is_solid())
 }
 
 /// Vanilla-like spawn position helper exposed for machine tests.
@@ -141,12 +154,12 @@ mod tests {
                 world.set_block(
                     BlockPos::new(x, 64, z),
                     vanilla_blocks::STONE.default_state(),
-                    UpdateFlags::UPDATE_CLIENTS,
+                    UpdateFlags::UPDATE_ALL,
                 );
                 world.set_block(
                     BlockPos::new(x, 70, z),
                     vanilla_blocks::STONE.default_state(),
-                    UpdateFlags::UPDATE_CLIENTS,
+                    UpdateFlags::UPDATE_ALL,
                 );
             }
         }
@@ -182,6 +195,90 @@ mod tests {
         assert!(
             hostiles > 0,
             "dark room natural spawning must add hostile entities to the world"
+        );
+    }
+
+    #[test]
+    fn dark_room_spawned_zombie_drop_is_collected_below_the_kill_floor() {
+        use steel_registry::{vanilla_blocks, vanilla_damage_types, vanilla_items};
+        use glam::DVec3;
+        use steel_utils::Downcast as _;
+
+        use crate::entity::LivingEntity;
+        use crate::entity::damage::DamageSource;
+        use crate::entity::entities::mobs::hostile::ZombieEntity;
+        use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
+
+        init_vanilla_registry();
+        init_behaviors();
+        init_block_entities();
+        let fixture = fresh_test_world("dark_room_collection");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        for x in 1..15 {
+            for z in 1..15 {
+                world.set_block(
+                    BlockPos::new(x, 64, z),
+                    vanilla_blocks::STONE.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+                world.set_block(
+                    BlockPos::new(x, 70, z),
+                    vanilla_blocks::STONE.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+            }
+        }
+        let player = TestPlayerBuilder::new(Arc::clone(world), "CollectAfk", 98).build();
+        player.teleport_to(glam::DVec3::new(8.5, 65.0, 8.5)).expect("player floor");
+        assert!(world.add_player(player, ResetReason::InitialJoin));
+        world.set_natural_spawning_enabled(true);
+        assert!(tick_natural_spawns(world, 800) > 0, "tower must spawn hostiles");
+
+        let zombies = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 72.0, 16.0),
+            |entity| entity.entity_type() == &vanilla_entities::ZOMBIE,
+        );
+        let zombie = zombies.first().expect("tower must spawn at least one zombie").clone();
+        let position = zombie.position();
+        let hopper_pos = BlockPos::new(position.x.floor() as i32, 64, position.z.floor() as i32);
+        let chest_pos = hopper_pos.below();
+        world.set_block(hopper_pos, vanilla_blocks::HOPPER.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(chest_pos, vanilla_blocks::CHEST.default_state(), UpdateFlags::UPDATE_ALL);
+
+        let concrete = zombie.downcast_ref::<ZombieEntity>().expect("zombie concrete");
+        let source = DamageSource::environment(&vanilla_damage_types::GENERIC);
+        assert!(concrete.hurt_server(world, &source, 100.0), "zombie must die");
+        concrete.die(&source);
+        // The headless world tick does not run item gravity, so place the
+        // dropped stack on the hopper's suction surface and stop its random
+        // horizontal drift. This is the state a real tower reaches after the
+        // item falls down the kill shaft.
+        let drops = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 68.0, 16.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        let drop = drops.first().expect("zombie must drop loot");
+        drop.teleport_to(DVec3::new(
+            f64::from(hopper_pos.x()) + 0.5,
+            f64::from(hopper_pos.y()) + 1.0,
+            f64::from(hopper_pos.z()) + 0.5,
+        ))
+        .expect("drop must land above the hopper");
+        drop.set_velocity(DVec3::ZERO);
+        for _ in 0..40 {
+            if let Some(hopper) = world.get_block_entity(hopper_pos) {
+                hopper.tick(world);
+            }
+        }
+
+        let chest = world.get_block_entity(chest_pos).expect("chest");
+        let chest_ref = ContainerRef::from_block_entity(chest).expect("chest container");
+        let guard = ContainerLockGuard::lock_all(&[&chest_ref]).expect("lock chest");
+        let inventory = guard.get(chest_ref.container_id()).expect("chest inventory");
+        assert!(
+            (0..27).any(|slot| inventory.get_item(slot).is(&vanilla_items::ROTTEN_FLESH)),
+            "tower spawned zombie drop must be hoppered into the chest"
         );
     }
 }
