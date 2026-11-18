@@ -1356,6 +1356,86 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_spawned_chest_boat_has_27_slot_inventory() {
+        let fixture = fixture("dispenser_chest_boat_inventory");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::OAK_CHEST_BOAT),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::OAK_CHEST_BOAT),
+            1
+        );
+        let chest_boat = fixture
+            .world
+            .get_entities_in_aabb(&WorldAabb::new(0.0, -1.0, 0.0, 1.0, 0.0, 1.0))
+            .into_iter()
+            .find(|entity| {
+                entity
+                    .downcast_ref::<crate::entity::entities::ChestBoatEntity>()
+                    .is_some()
+            })
+            .expect("chest boat");
+        let chest_boat = chest_boat
+            .downcast_ref::<crate::entity::entities::ChestBoatEntity>()
+            .expect("chest boat");
+        let container = chest_boat.chest_container();
+        let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+        assert_eq!(
+            guard
+                .get(container.container_id())
+                .expect("container")
+                .get_container_size(),
+            27
+        );
+    }
+
+    #[test]
+    fn dispenser_spawned_armor_stand_has_six_equipment_slots() {
+        let fixture = fixture("dispenser_armor_stand_equipment");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::ARMOR_STAND),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        let armor_stand = fixture
+            .world
+            .get_entities_in_aabb(&WorldAabb::new(0.0, -1.0, 0.0, 1.0, 0.0, 1.0))
+            .into_iter()
+            .find(|entity| {
+                entity
+                    .downcast_ref::<crate::entity::entities::ArmorStandEntity>()
+                    .is_some()
+            })
+            .expect("armor stand");
+        let armor_stand = armor_stand
+            .downcast_ref::<crate::entity::entities::ArmorStandEntity>()
+            .expect("armor stand");
+        let container = armor_stand.equipment_container();
+        let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+        assert_eq!(
+            guard
+                .get(container.container_id())
+                .expect("container")
+                .get_container_size(),
+            6
+        );
+    }
+
+    #[test]
     fn dropper_moves_whole_stack_into_container_below() {
         let fixture = fixture("dropper_transfer");
         let state = facing_down(&vanilla_blocks::DROPPER);

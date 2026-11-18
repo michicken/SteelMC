@@ -1,22 +1,26 @@
 //! Vanilla armor stand entity.
 
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use glam::DVec3;
 
 use steel_macros::entity_behavior;
 use steel_registry::entity_type::EntityTypeRef;
+use steel_utils::locks::{Shared, SyncMutex};
 use steel_utils::{DowncastType, DowncastTypeKey};
 
 use crate::entity::{Entity, EntityBase, EntityBaseLoad};
+use crate::inventory::container::SimpleContainer;
+use crate::inventory::lock::ContainerRef;
 use crate::world::World;
 
-/// An armor stand. Equipment slots are supplied by the living/equipment
-/// layer; this entity provides the real spawnable object and its base state.
+/// An armor stand with the six vanilla equipment slots (main hand, off hand,
+/// head, chest, legs, feet).
 #[entity_behavior(class = "ArmorStand")]
 pub struct ArmorStandEntity {
     base: EntityBase,
     entity_type: EntityTypeRef,
+    equipment: OnceLock<Shared<SimpleContainer>>,
 }
 
 // SAFETY: This key is owned by Steel and uniquely identifies `ArmorStandEntity`.
@@ -31,7 +35,17 @@ impl ArmorStandEntity {
         Self {
             base: EntityBase::new(id, position, entity_type.dimensions, world),
             entity_type,
+            equipment: OnceLock::new(),
         }
+    }
+
+    /// The six equipment slots: main hand, off hand, head, chest, legs, feet.
+    #[must_use]
+    pub fn equipment_container(&self) -> ContainerRef {
+        let equipment = self
+            .equipment
+            .get_or_init(|| Arc::new(SyncMutex::new(SimpleContainer::new(6))));
+        ContainerRef::from(equipment)
     }
 
     /// Creates an armor stand from saved data.
@@ -40,6 +54,7 @@ impl ArmorStandEntity {
         Self {
             base: EntityBase::from_load(load, entity_type.dimensions),
             entity_type,
+            equipment: OnceLock::new(),
         }
     }
 }
