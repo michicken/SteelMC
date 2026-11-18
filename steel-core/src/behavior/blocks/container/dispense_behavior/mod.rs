@@ -244,7 +244,14 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
             1.0,
         )),
     );
-    // TODO: fire charge - needs its projectile entity.
+    registry.set_behavior(
+        &vanilla_items::FIRE_CHARGE,
+        Box::new(ProjectileDispenseBehavior::new(
+            &vanilla_entities::SMALL_FIREBALL,
+            1.0,
+            0.0,
+        )),
+    );
 
     registry.set_behavior(&vanilla_items::TNT, Box::new(TntDispenseBehavior));
 

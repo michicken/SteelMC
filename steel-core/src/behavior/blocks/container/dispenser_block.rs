@@ -584,11 +584,13 @@ mod tests {
                 &vanilla_entities::EXPERIENCE_BOTTLE,
                 "experience_bottle",
             ),
+            (&*vanilla_items::FIRE_CHARGE, &vanilla_entities::SMALL_FIREBALL, "fire_charge"),
         ] {
             let fixture = fixture(match name {
                 "wind_charge" => "dispenser_wind_charge",
                 "firework" => "dispenser_firework",
-                _ => "dispenser_experience_bottle",
+                "experience_bottle" => "dispenser_experience_bottle",
+                _ => "dispenser_fire_charge",
             });
             let state = facing_down(&vanilla_blocks::DISPENSER);
             place_machine(&fixture.world, state, false);
