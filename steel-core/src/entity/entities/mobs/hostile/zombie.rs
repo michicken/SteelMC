@@ -10,7 +10,8 @@ use steel_protocol::packets::game::SoundSource;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::ZombieEntityData;
-use steel_registry::{sound_events, vanilla_attributes};
+use steel_registry::item_stack::ItemStack;
+use steel_registry::{sound_events, vanilla_attributes, vanilla_items};
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
 
@@ -230,6 +231,14 @@ impl LivingEntity for ZombieEntity {
         Some(&sound_events::ENTITY_ZOMBIE_HURT)
     }
 
+    fn drop_custom_death_loot(&self, _source: &DamageSource, _killed_by_player: bool) {
+        let Some(world) = self.level() else {
+            return;
+        };
+        let drop_pos = self.position() + DVec3::new(0.0, 0.5, 0.0);
+        world.spawn_item(drop_pos, ItemStack::new(&vanilla_items::ROTTEN_FLESH));
+    }
+
     fn death_sound(&self) -> Option<SoundEventRef> {
         Some(&sound_events::ENTITY_ZOMBIE_DEATH)
     }
@@ -406,4 +415,61 @@ mod tests {
         assert!(!zombie.is_removed());
     }
 
+
+    #[test]
+    fn zombie_death_loot_is_collected_by_hopper_below() {
+        use steel_registry::vanilla_damage_types;
+        use steel_registry::vanilla_items;
+
+        use crate::entity::damage::DamageSource;
+        use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
+
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+        let fixture = fresh_test_world("zombie_hopper_loot");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        let hopper_pos = BlockPos::new(8, 63, 8);
+        let chest_pos = BlockPos::new(8, 62, 8);
+        world.set_block(hopper_pos, vanilla_blocks::HOPPER.default_state(), steel_utils::types::UpdateFlags::UPDATE_ALL);
+        world.set_block(chest_pos, vanilla_blocks::CHEST.default_state(), steel_utils::types::UpdateFlags::UPDATE_ALL);
+        let zombie: SharedEntity = Arc::new(ZombieEntity::new(
+            &vanilla_entities::ZOMBIE,
+            next_entity_id(),
+            DVec3::new(8.5, 64.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&zombie))
+            .expect("zombie must attach");
+        let source = DamageSource::environment(&vanilla_damage_types::GENERIC);
+        let concrete = zombie
+            .downcast_ref::<ZombieEntity>()
+            .expect("zombie must be concrete");
+        assert!(
+            concrete.hurt_server(world, &source, 100.0),
+            "lethal damage must kill the zombie"
+        );
+        concrete.die(&source);
+        let drops = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(7.0, 63.0, 7.0, 10.0, 66.0, 10.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        for _ in 0..40 {
+            if let Some(be) = world.get_block_entity(hopper_pos) {
+                be.tick(world);
+            }
+        }
+        let chest = world.get_block_entity(chest_pos).expect("chest block entity");
+        let chest_ref = ContainerRef::from_block_entity(chest).expect("chest container");
+        let guard = ContainerLockGuard::lock_all(&[&chest_ref]).expect("lock chest");
+        let inventory = guard
+            .get(chest_ref.container_id())
+            .expect("locked chest inventory");
+        assert!(
+            (0..27).any(|slot| inventory.get_item(slot).is(&vanilla_items::ROTTEN_FLESH)),
+            "hopper must move zombie rotten flesh into the chest"
+        );
+    }
 }
