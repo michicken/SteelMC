@@ -698,6 +698,127 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_places_shulker_box_from_tagged_item() {
+        let fixture = fixture("dispenser_shulker");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::AIR.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::SHULKER_BOX),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+        assert_eq!(
+            fixture.world.get_block_state(BELOW_POS).get_block(),
+            &vanilla_blocks::SHULKER_BOX,
+            "dispenser must place a shulker box from the shulker box tag"
+        );
+        assert_eq!(
+            count_at(&fixture.world, DISPENSER_POS, 0),
+            0,
+            "placing a shulker box consumes the dispensed item"
+        );
+    }
+
+    #[test]
+    fn dispenser_places_powder_snow_bucket_and_returns_empty_bucket() {
+        let fixture = fixture("dispenser_powder_snow");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::AIR.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::POWDER_SNOW_BUCKET),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+        assert_eq!(
+            fixture.world.get_block_state(BELOW_POS).get_block(),
+            &vanilla_blocks::POWDER_SNOW,
+            "filled bucket behavior must place powder snow"
+        );
+        let container = container_at(&fixture.world, DISPENSER_POS);
+        let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+        let inventory = guard.get(container.container_id()).expect("inventory");
+        assert!(
+            inventory.get_item(0).is(&vanilla_items::BUCKET),
+            "powder snow bucket must return an empty bucket"
+        );
+    }
+
+    #[test]
+    fn dispenser_turns_dirt_into_mud_with_a_water_bottle() {
+        let fixture = fixture("dispenser_mud");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::DIRT.default_state(),
+            UpdateFlags::UPDATE_ALL
+        ));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            steel_registry::data_components::PotionContents::create_item_stack(
+                &vanilla_items::POTION,
+                &steel_registry::vanilla_potions::WATER,
+            ),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+        assert_eq!(
+            fixture.world.get_block_state(BELOW_POS).get_block(),
+            &vanilla_blocks::MUD,
+            "water bottle must convert dirt to mud"
+        );
+        let container = container_at(&fixture.world, DISPENSER_POS);
+        let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+        let inventory = guard.get(container.container_id()).expect("inventory");
+        assert!(
+            inventory.get_item(0).is(&vanilla_items::GLASS_BOTTLE),
+            "water bottle must return a glass bottle"
+        );
+    }
+
+    #[test]
+    fn dispenser_charges_respawn_anchor_with_glowstone() {
+        let fixture = fixture("dispenser_anchor");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::RESPAWN_ANCHOR.default_state(),
+            UpdateFlags::UPDATE_ALL
+        ));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::GLOWSTONE),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+        assert_eq!(
+            fixture
+                .world
+                .get_block_state(BELOW_POS)
+                .get_value(&steel_registry::blocks::properties::BlockStateProperties::RESPAWN_ANCHOR_CHARGES),
+            1,
+            "glowstone must add one charge to a respawn anchor"
+        );
+    }
+
+    #[test]
     fn dispenser_plants_sapling_on_soil_for_tree_farm_replanting() {
         let fixture = fixture("dispenser_sapling");
         let state = facing_down(&vanilla_blocks::DISPENSER);
