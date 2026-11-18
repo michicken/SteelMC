@@ -17,10 +17,12 @@ use crate::world::World;
 
 pub mod armor;
 use brush::BrushDispenseBehavior;
+use chest::ChestDispenseBehavior;
 use entity::SpawnEntityDispenseBehavior;
 use mob_bucket::MobBucketDispenseBehavior;
 pub mod arrow;
 pub mod brush;
+pub mod chest;
 pub mod block_place;
 pub mod bucket;
 pub mod consumables;
@@ -141,6 +143,7 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         Box::new(EmptyBucketDispenseBehavior),
     );
     registry.set_behavior(&vanilla_items::BRUSH, Box::new(BrushDispenseBehavior));
+    registry.set_behavior(&vanilla_items::CHEST, Box::new(ChestDispenseBehavior));
 
     // mob buckets: spawn the captured entity and leave an empty bucket.
     for item in [

@@ -1303,6 +1303,59 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_equips_chest_on_donkey() {
+        let fixture = fixture("dispenser_donkey_chest");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(
+            spawn_entity(
+                &fixture.world,
+                EntitySpawnRequest {
+                    entity_type: &vanilla_entities::DONKEY,
+                    placement: EntitySpawnPlacement::Block {
+                        pos: BELOW_POS,
+                        try_move_down: false,
+                        moved_up: false,
+                    },
+                    reason: EntitySpawnReason::Command,
+                    finalize_spawn: true,
+                    play_ambient_sound: false,
+                    item_stack: None,
+                    user_is_operator: false,
+                },
+            )
+            .is_ok()
+        );
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::CHEST),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            count_at(&fixture.world, DISPENSER_POS, 0),
+            0,
+            "the chest must be consumed by the donkey"
+        );
+        let entity = fixture
+            .world
+            .get_entities_in_aabb(&WorldAabb::new(0.0, -1.0, 0.0, 1.0, 0.0, 1.0))
+            .into_iter()
+            .find(|entity| entity.downcast_ref::<crate::entity::entities::DonkeyEntity>().is_some())
+            .expect("donkey");
+        assert!(
+            entity
+                .downcast_ref::<crate::entity::entities::DonkeyEntity>()
+                .expect("donkey")
+                .has_chest()
+        );
+        assert_eq!(Entity::entity_type(entity.as_ref()), &vanilla_entities::DONKEY);
+    }
+
+    #[test]
     fn dropper_moves_whole_stack_into_container_below() {
         let fixture = fixture("dropper_transfer");
         let state = facing_down(&vanilla_blocks::DROPPER);
