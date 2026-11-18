@@ -263,7 +263,7 @@ mod tests {
             dispenser_state.set_value(&BlockStateProperties::TRIGGERED, false),
             UpdateFlags::UPDATE_NONE,
         );
-        world.update_neighbors_at(dispenser_pos, &vanilla_blocks::DISPENSER);
+        world.update_neighbors_at(dispenser_pos.west(), &vanilla_blocks::REDSTONE_BLOCK);
         world.run_block_events();
 
         tick_world(&world, 6);
