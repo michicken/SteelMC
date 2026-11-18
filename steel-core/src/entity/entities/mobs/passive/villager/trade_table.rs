@@ -276,6 +276,9 @@ pub fn append_level_offers(path: &str, requested_level: i32, out: &mut Vec<Merch
             max_uses: entry.max_uses,
             uses: 0,
             xp: entry.xp,
+            demand: 0,
+            special_price: 0,
+            price_multiplier: 0.05,
         });
     }
 }

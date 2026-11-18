@@ -22,6 +22,12 @@ pub struct MerchantOffer {
     pub max_uses: i32,
     pub uses: i32,
     pub xp: i32,
+    /// Vanilla supply/demand counter (0..=12).
+    pub demand: i32,
+    /// Vanilla reputation/special-price adjustment, applied to the first want.
+    pub special_price: i32,
+    /// Vanilla price multiplier (usually 0.05) for the demand term.
+    pub price_multiplier: f32,
 }
 
 impl MerchantOffer {
@@ -29,6 +35,25 @@ impl MerchantOffer {
     #[must_use]
     pub const fn is_disabled(&self) -> bool {
         self.uses >= self.max_uses
+    }
+
+    /// Returns the wanted stacks with vanilla's demand/special-price
+    /// adjustment applied to the first stack:
+    ///
+    /// `base + floor(base * demand * price_multiplier) + special_price`, clamped to
+    /// `1..=max_stack_size`.
+    #[must_use]
+    pub fn adjusted_wants(&self) -> Vec<ItemStack> {
+        let mut wants = self.wants.clone();
+        if let Some(first) = wants.first_mut() {
+            let base = first.count();
+            let demand_delta =
+                (base as f32 * self.demand.max(0) as f32 * self.price_multiplier).floor() as i32;
+            let adjusted = (base + demand_delta + self.special_price)
+                .clamp(1, first.max_stack_size());
+            *first = first.copy_with_count(adjusted);
+        }
+        wants
     }
 }
 
@@ -55,6 +80,9 @@ const fn offer(wants: Vec<ItemStack>, gives: ItemStack, max_uses: i32, xp: i32) 
         max_uses,
         uses: 0,
         xp,
+        demand: 0,
+        special_price: 0,
+        price_multiplier: 0.05,
     }
 }
 
@@ -388,16 +416,16 @@ pub fn execute_trade(
         return Err(TradeError::OfferDisabled);
     }
 
+    let wanted_stacks = offer.adjusted_wants();
     let mut inventory = player.inventory.lock();
-    if offer
-        .wants
+    if wanted_stacks
         .iter()
         .any(|wanted| count_matching(&inventory, wanted) < wanted.count())
     {
         return Err(TradeError::MissingInputs);
     }
 
-    for wanted in &offer.wants {
+    for wanted in &wanted_stacks {
         remove_matching(&mut inventory, wanted, wanted.count());
     }
 
@@ -412,6 +440,7 @@ pub fn execute_trade(
     }
 
     offer.uses += 1;
+    offer.demand = (offer.demand + 1).min(12);
     Ok(TradeOutcome {
         xp: offer.xp,
         level_ups: 0,
@@ -512,6 +541,58 @@ mod tests {
             .map(ItemStack::count)
             .sum();
         assert_eq!(emeralds, 1, "trade must insert the real emerald result");
+    }
+
+    #[test]
+    fn demand_and_special_price_adjust_the_first_want() {
+        init_vanilla_registry();
+        let mut offer = level_one_offers("farmer")[4].clone();
+        assert_eq!(offer.wants[0].count(), 20);
+
+        offer.demand = 4; // 20 * 4 * 0.05 = +4
+        offer.special_price = -2;
+        assert_eq!(offer.adjusted_wants()[0].count(), 22);
+
+        offer.demand = 12; // 20 * 12 * 0.05 = +12
+        offer.special_price = 10;
+        assert_eq!(offer.adjusted_wants()[0].count(), 42);
+
+        offer.special_price = -100;
+        assert_eq!(
+            offer.adjusted_wants()[0].count(),
+            1,
+            "vanilla clamps the adjusted first cost to at least one"
+        );
+    }
+
+    #[test]
+    fn demand_price_is_charged_during_real_trade() {
+        use crate::inventory::container::Container as _;
+        use crate::test_support::{TestPlayerBuilder, fresh_test_world};
+
+        init_vanilla_registry();
+        let fixture = fresh_test_world("merchant_demand_price");
+        let player = TestPlayerBuilder::new(Arc::clone(&fixture.world), "DemandTrader", 1).build();
+        player
+            .inventory
+            .lock()
+            .set_item(0, ItemStack::with_count(&vanilla_items::WHEAT, 30));
+
+        let mut offers = level_one_offers("farmer");
+        offers[4].demand = 4; // 20 + 4 = 24 wheat
+        offers[4].special_price = -2; // 22 wheat
+        execute_trade(&mut offers, &player, 4).expect("discounted demand trade must succeed");
+
+        let inventory = player.inventory.lock();
+        let wheat: i32 = inventory
+            .items()
+            .iter()
+            .filter(|stack| stack.item() == &*vanilla_items::WHEAT)
+            .map(ItemStack::count)
+            .sum();
+        assert_eq!(wheat, 8, "30 wheat minus the adjusted 22 must remain");
+        assert_eq!(offers[4].uses, 1);
+        assert_eq!(offers[4].demand, 5, "a real trade raises demand by one");
     }
 
     #[test]
