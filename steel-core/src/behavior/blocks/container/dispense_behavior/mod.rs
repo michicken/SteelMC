@@ -42,6 +42,7 @@ pub use firework::FireworkRocketDispenseBehavior;
 pub use potion::{GlassBottleDispenseBehavior, PotionDispenseBehavior};
 pub use projectile::ProjectileDispenseBehavior;
 pub use spawn_egg::SpawnEggDispenseBehavior;
+pub use tools::ShearsDispenseBehavior;
 pub use tnt::TntDispenseBehavior;
 pub use tools::FlintAndSteelDispenseBehavior;
 
@@ -260,7 +261,8 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         &vanilla_items::FLINT_AND_STEEL,
         Box::new(FlintAndSteelDispenseBehavior),
     );
-    // TODO: shears, brush - see tools.rs
+    registry.set_behavior(&vanilla_items::SHEARS, Box::new(ShearsDispenseBehavior));
+    // TODO: brush - needs the Armadillo entity.
 
     // container
     for item in REGISTRY.items.iter_tag(&ItemTag::SHULKER_BOXES) {

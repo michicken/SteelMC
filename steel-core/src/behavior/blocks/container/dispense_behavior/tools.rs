@@ -77,3 +77,39 @@ impl DispenseItemBehavior for FlintAndSteelDispenseBehavior {
 // own shear() today; that alone would silently diverge from vanilla.
 
 // TODO: BrushDispenseBehavior — needs the Armadillo entity, which doesn't exist.
+
+/// Vanilla `ShearsDispenseItemBehavior`: shear a growing plant tip in front.
+pub struct ShearsDispenseBehavior;
+
+impl DispenseItemBehavior for ShearsDispenseBehavior {
+    fn dispense(
+        &self,
+        world: &Arc<World>,
+        pos: BlockPos,
+        state: BlockStateId,
+        mut item: ItemStack,
+    ) -> ItemStack {
+        let facing = state.get_value(FACING);
+        let target_pos = pos.relative(facing);
+        let target_state = world.get_block_state(target_pos);
+        let behavior = crate::behavior::BLOCK_BEHAVIORS.get_behavior(target_state.get_block());
+        let Some(plant) = behavior.as_growing_plant_head() else {
+            world.level_event(level_events::SOUND_DISPENSER_FAIL, pos, 0, None);
+            return item;
+        };
+        if plant.is_max_age(target_state) {
+            world.level_event(level_events::SOUND_DISPENSER_FAIL, pos, 0, None);
+            return item;
+        }
+
+        world.set_block(
+            target_pos,
+            plant.get_max_age_state(target_state),
+            UpdateFlags::UPDATE_ALL,
+        );
+        world.play_block_sound(&steel_registry::sound_events::BLOCK_GROWING_PLANT_CROP, target_pos, 1.0, 1.0, None);
+        item.hurt_and_break(1, false);
+        world.level_event(level_events::SOUND_DISPENSER_DISPENSE, pos, 0, None);
+        item
+    }
+}
