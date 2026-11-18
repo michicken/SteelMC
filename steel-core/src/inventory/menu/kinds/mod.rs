@@ -11,6 +11,7 @@ mod furnace_menu;
 mod generic_9x_menu;
 mod grindstone_menu;
 mod inventory_menu;
+mod merchant_menu;
 mod shulker_box_menu;
 
 pub use anvil_menu::{AnvilKind, anvil};
@@ -24,4 +25,5 @@ pub use furnace_menu::{FurnaceMenuKind, furnace_menu};
 pub use generic_9x_menu::{Generic9xKind, generic_9x_menu};
 pub use grindstone_menu::{GrindstoneKind, grindstone};
 pub use inventory_menu::{INVENTORY_MENU_CONTAINER_ID, InventoryKind, inventory_menu};
+pub use merchant_menu::{MerchantKind, merchant};
 pub use shulker_box_menu::{ShulkerBoxKind, shulker_box};

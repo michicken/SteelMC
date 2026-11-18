@@ -22,4 +22,4 @@ pub use mooshroom::MushroomCowEntity;
 pub use pig::PigEntity;
 pub use sheep::SheepEntity;
 pub use squid::SquidEntity;
-pub use villager::VillagerEntity;
+pub use villager::{MerchantOffer, VillagerEntity};
