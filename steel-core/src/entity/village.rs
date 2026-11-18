@@ -228,9 +228,12 @@ mod tests {
     use steel_utils::{ChunkPos, Downcast as _};
 
     use super::{MIN_VILLAGERS, try_spawn_iron_golem};
-    use crate::entity::entities::{IronGolemEntity, VillagerEntity};
+    use crate::entity::damage::DamageSource;
+    use crate::entity::entities::{IronGolemEntity, ItemEntity, VillagerEntity};
     use crate::entity::{Entity, LivingEntity, SharedEntity, next_entity_id};
+    use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
     use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
+    use steel_registry::{vanilla_damage_types, vanilla_items};
 
     fn villager(world: &Arc<crate::world::World>, x: f64) -> SharedEntity {
         Arc::new(VillagerEntity::new(
@@ -277,6 +280,160 @@ mod tests {
             .expect("iron golem must be concrete");
         assert_eq!(golem.entity_type(), &vanilla_entities::IRON_GOLEM);
         assert!(golem.get_health() > 0.0);
+    }
+
+    #[test]
+    fn villager_ai_harvests_crop_farm_and_hopper_collects_wheat() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+        let fixture = fresh_test_world("village_crop_auto");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let villager = villager(world, 8.0);
+        world
+            .try_add_entity(Arc::clone(&villager))
+            .expect("villager must attach");
+        let concrete = villager
+            .downcast_ref::<VillagerEntity>()
+            .expect("villager concrete");
+
+        let farmland = steel_utils::BlockPos::new(8, 63, 8);
+        let wheat = steel_utils::BlockPos::new(8, 64, 8);
+        world.set_block(farmland, vanilla_blocks::FARMLAND.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(
+            wheat,
+            vanilla_blocks::WHEAT.default_state().set_value(
+                &BlockStateProperties::AGE_7,
+                7,
+            ),
+            UpdateFlags::UPDATE_ALL,
+        );
+        let hopper = steel_utils::BlockPos::new(9, 63, 8);
+        let chest = steel_utils::BlockPos::new(9, 62, 8);
+        world.set_block(hopper, vanilla_blocks::HOPPER.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(chest, vanilla_blocks::CHEST.default_state(), UpdateFlags::UPDATE_ALL);
+
+        // The villager's production AI runs the village crop loop every 200gt.
+        for _ in 0..200 {
+            concrete.ai_step(&villager);
+        }
+        assert_eq!(
+            world.get_block_state(wheat).get_block(),
+            &vanilla_blocks::WHEAT,
+            "villager must replant the harvested wheat"
+        );
+
+        let drops = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(6.0, 63.0, 6.0, 11.0, 67.0, 10.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        for entity in &drops {
+            if entity
+                .downcast_ref::<ItemEntity>()
+                .is_some_and(|item| item.get_item().is(&vanilla_items::WHEAT))
+            {
+                let _ = entity.teleport_to(glam::DVec3::new(9.5, 64.2, 8.5));
+            }
+        }
+        for _ in 0..40 {
+            if let Some(block_entity) = world.get_block_entity(hopper) {
+                block_entity.tick(world);
+            }
+        }
+        let chest_ref = ContainerRef::from_block_entity(
+            world.get_block_entity(chest).expect("chest"),
+        )
+        .expect("chest container");
+        let guard = ContainerLockGuard::lock_all(&[&chest_ref]).expect("lock chest");
+        let inventory = guard.get(chest_ref.container_id()).expect("chest inventory");
+        assert!(
+            (0..27).any(|slot| inventory.get_item(slot).is(&vanilla_items::WHEAT)),
+            "hopper must collect the villager-harvested wheat"
+        );
+    }
+
+    #[test]
+    fn iron_golem_farm_drops_iron_ingots_into_hopper() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+        let fixture = fresh_test_world("village_iron_farm");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        for x in [8.0, 10.0, 12.0] {
+            world
+                .try_add_entity(villager(world, x))
+                .expect("villager must attach");
+        }
+        for (x, z) in [(8, 10), (10, 10), (12, 10)] {
+            world.set_block(
+                steel_utils::BlockPos::new(x, 64, z),
+                vanilla_blocks::WHITE_BED
+                    .default_state()
+                    .set_value(&BlockStateProperties::BED_PART, BedPart::Head),
+                UpdateFlags::UPDATE_ALL,
+            );
+        }
+        for (x, z) in [(8, 6), (10, 6), (12, 6)] {
+            world.set_block(
+                steel_utils::BlockPos::new(x, 64, z),
+                vanilla_blocks::COMPOSTER.default_state(),
+                UpdateFlags::UPDATE_ALL,
+            );
+        }
+        let golem = try_spawn_iron_golem(world, steel_utils::BlockPos::new(10, 64, 8))
+            .expect("village thresholds must spawn a golem");
+        let concrete = golem.downcast_ref::<IronGolemEntity>().expect("golem concrete");
+
+        let hopper = steel_utils::BlockPos::new(10, 64, 8);
+        let chest = steel_utils::BlockPos::new(10, 63, 8);
+        world.set_block(hopper, vanilla_blocks::HOPPER.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(chest, vanilla_blocks::CHEST.default_state(), UpdateFlags::UPDATE_ALL);
+
+        let lava = DamageSource::environment(&vanilla_damage_types::LAVA);
+        assert!(concrete.hurt(world, &lava, 200.0), "lava must kill the golem");
+        for _ in 0..20 {
+            Arc::clone(&golem).tick();
+        }
+        let drops = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(7.0, 63.0, 7.0, 13.0, 67.0, 9.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        assert!(
+            drops.iter().any(|entity| entity
+                .downcast_ref::<ItemEntity>()
+                .is_some_and(|item| item.get_item().is(&vanilla_items::IRON_INGOT))),
+            "iron golem must drop iron ingots"
+        );
+        let drops = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(6.0, 63.0, 6.0, 11.0, 67.0, 10.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        for entity in &drops {
+            if entity
+                .downcast_ref::<ItemEntity>()
+                .is_some_and(|item| item.get_item().is(&vanilla_items::WHEAT))
+            {
+                let _ = entity.teleport_to(glam::DVec3::new(9.5, 64.2, 8.5));
+            }
+        }
+        for _ in 0..40 {
+            if let Some(block_entity) = world.get_block_entity(hopper) {
+                block_entity.tick(world);
+            }
+        }
+        let chest_ref = ContainerRef::from_block_entity(
+            world.get_block_entity(chest).expect("chest"),
+        )
+        .expect("chest container");
+        let guard = ContainerLockGuard::lock_all(&[&chest_ref]).expect("lock chest");
+        let inventory = guard.get(chest_ref.container_id()).expect("chest inventory");
+        assert!(
+            (0..27).any(|slot| inventory.get_item(slot).is(&vanilla_items::IRON_INGOT)),
+            "iron golem farm hopper must collect iron ingots"
+        );
     }
 
     #[test]

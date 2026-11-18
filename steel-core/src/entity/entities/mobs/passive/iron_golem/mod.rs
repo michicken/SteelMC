@@ -8,8 +8,9 @@ use steel_macros::entity_behavior;
 use steel_protocol::packets::game::SoundSource;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
+use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_entity_data::IronGolemEntityData;
-use steel_registry::{sound_events, vanilla_attributes};
+use steel_registry::{sound_events, vanilla_attributes, vanilla_items};
 use steel_utils::locks::SyncMutex;
 use steel_utils::nbt::NbtValueInput as _;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
@@ -166,6 +167,22 @@ impl Entity for IronGolemEntity {
 }
 
 impl LivingEntity for IronGolemEntity {
+    fn drop_custom_death_loot(&self, _source: &DamageSource, _killed_by_player: bool) {
+        let Some(world) = self.level() else {
+            return;
+        };
+        let drop_pos = self.position() + DVec3::new(0.0, 0.5, 0.0);
+        // Vanilla iron golem: 3-5 iron ingots, plus 0-2 poppies.
+        let ingots = rand::random_range(3..=5);
+        for _ in 0..ingots {
+            world.spawn_item(drop_pos, ItemStack::new(&vanilla_items::IRON_INGOT));
+        }
+        let poppies = rand::random_range(0..=2);
+        for _ in 0..poppies {
+            world.spawn_item(drop_pos, ItemStack::new(&vanilla_items::POPPY));
+        }
+    }
+
     fn living_base(&self) -> &LivingEntityBase {
         &self.living_base
     }

@@ -188,17 +188,16 @@ impl FeatureDecorationRunner {
         tree_pos: BlockPos,
         config: &TreeConfiguration,
     ) -> i32 {
+        // Vanilla `TreeFeature.maxFreeTreeHeight` checks only the trunk column.
+        // Canopy blocks are clipped later by `placeFoliage`; testing the canopy
+        // radius here makes trees fail next to dispensers/hoppers, which is fatal
+        // for tree farms.
         for y in 0..=max_tree_height + 1 {
-            let radius = Self::tree_size_at_height(&config.minimum_size, max_tree_height, y);
-            for x in -radius..=radius {
-                for z in -radius..=radius {
-                    let pos = tree_pos.offset(x, y, z);
-                    if !Self::tree_trunk_placer_is_free(region, pos, &config.trunk_placer)
-                        || (!config.ignore_vines && Self::tree_is_vine(region, pos))
-                    {
-                        return y - 2;
-                    }
-                }
+            let pos = tree_pos.offset(0, y, 0);
+            if !Self::tree_trunk_placer_is_free(region, pos, &config.trunk_placer)
+                || (!config.ignore_vines && Self::tree_is_vine(region, pos))
+            {
+                return y - 2;
             }
         }
 

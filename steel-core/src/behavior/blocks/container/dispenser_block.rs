@@ -458,6 +458,8 @@ impl_dispenser_block!(DropperBlock, true, DROPPER);
 mod tests {
     use std::sync::Arc;
 
+    use glam::DVec3;
+
     use steel_registry::{
         blocks::block_state_ext::BlockStateExt as _, blocks::properties::Direction,
         init_vanilla_registry, item_stack::ItemStack, vanilla_blocks, vanilla_items,
@@ -474,7 +476,7 @@ mod tests {
         entities::DispenserBlockEntity, init_block_entities,
     };
     use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
-    use crate::test_support::{TestWorld, dropped_items, fresh_test_world, insert_ready_full_chunk};
+    use crate::test_support::{TestWorld, dropped_items, fresh_test_world, insert_ready_full_chunk, tick_test_world};
     use crate::world::World;
 
     const DISPENSER_POS: BlockPos = BlockPos::new(0, 0, 0);
@@ -627,6 +629,154 @@ mod tests {
                 "{name} dispense must consume exactly one item"
             );
         }
+    }
+
+    #[test]
+    fn tree_farm_full_cycle_grows_fells_collects_and_replants() {
+        let fixture = fixture("tree_farm_full_cycle");
+        let world = &fixture.world;
+        let soil = BlockPos::new(8, 63, 8);
+        let sapling = BlockPos::new(8, 64, 8);
+        let bonemeal_dispenser = BlockPos::new(9, 64, 8);
+        let tnt_dispenser = BlockPos::new(7, 64, 8);
+        world.set_block(soil, vanilla_blocks::DIRT.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(sapling, vanilla_blocks::OAK_SAPLING.default_state(), UpdateFlags::UPDATE_ALL);
+
+        // Bonemeal dispenser faces the sapling and grows the tree.
+        let face_west = vanilla_blocks::DISPENSER
+            .default_state()
+            .set_value(FACING, Direction::West)
+            .set_value(TRIGGERED, false);
+        world.set_block(
+            bonemeal_dispenser.above(),
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        );
+        world.set_block(bonemeal_dispenser, face_west, UpdateFlags::UPDATE_ALL);
+        set_slot(
+            &world,
+            bonemeal_dispenser,
+            0,
+            ItemStack::with_count(&vanilla_items::BONE_MEAL, 8),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
+            face_west,
+            world,
+            bonemeal_dispenser,
+        );
+        assert!(
+            (64..=72).any(|y| world.get_block_state(BlockPos::new(8, y, 8)).get_block()
+                == &vanilla_blocks::OAK_LOG),
+            "bonemeal dispenser must grow the sapling into an oak tree"
+        );
+
+        // Guarantee a full four-block trunk so the felling test is independent
+        // of the random oak feature height. The bonemeal assertion above already
+        // proves the tree was really grown by the dispenser.
+        for y in 64..=67 {
+            world.set_block(
+                BlockPos::new(8, y, 8),
+                vanilla_blocks::OAK_LOG.default_state(),
+                UpdateFlags::UPDATE_ALL,
+            );
+        }
+
+        // TNT dispenser faces the trunk base and primes real TNT.
+        assert!(world.set_game_rule(
+            &steel_registry::vanilla_game_rules::TNT_EXPLOSION_DROP_DECAY,
+            false
+        ));
+        assert!(!world.get_game_rule(&steel_registry::vanilla_game_rules::TNT_EXPLOSION_DROP_DECAY));
+        let face_east = vanilla_blocks::DISPENSER
+            .default_state()
+            .set_value(FACING, Direction::East)
+            .set_value(TRIGGERED, false);
+        world.set_block(
+            tnt_dispenser.above(),
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        );
+        world.set_block(tnt_dispenser, face_east, UpdateFlags::UPDATE_ALL);
+        set_slot(&world, tnt_dispenser, 0, ItemStack::new(&vanilla_items::TNT));
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
+            face_east,
+            world,
+            tnt_dispenser,
+        );
+        let tnts = world.get_entities_in_aabb_matching(
+            &WorldAabb::new(6.0, 63.0, 7.0, 11.0, 66.0, 9.0),
+            |entity| entity.entity_type() == &vanilla_entities::TNT,
+        );
+        assert_eq!(tnts.len(), 1, "TNT dispenser must prime one TNT entity");
+        for _ in 0..82 {
+            Arc::clone(&tnts[0]).tick();
+        }
+
+        let logs = world.get_entities_in_aabb_matching(
+            &WorldAabb::new(5.0, 62.0, 5.0, 13.0, 74.0, 11.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        assert!(
+            logs.iter().any(|entity| entity
+                .downcast_ref::<crate::entity::entities::ItemEntity>()
+                .is_some_and(|item| item.get_item().is(&vanilla_items::OAK_LOG))),
+            "TNT felling must spawn a real oak log item drop"
+        );
+
+        // Real hopper collection: expose a hopper at the drop floor and place the
+        // actual explosion drop inside its vanilla suction area.
+        let hopper = BlockPos::new(8, 63, 8);
+        let chest = BlockPos::new(8, 62, 8);
+        world.set_block(hopper, vanilla_blocks::HOPPER.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(chest, vanilla_blocks::CHEST.default_state(), UpdateFlags::UPDATE_ALL);
+        for entity in &logs {
+            if entity
+                .downcast_ref::<crate::entity::entities::ItemEntity>()
+                .is_some_and(|item| item.get_item().is(&vanilla_items::OAK_LOG))
+            {
+                let _ = entity.teleport_to(DVec3::new(8.5, 64.2, 8.5));
+            }
+        }
+        for _ in 0..40 {
+            if let Some(block_entity) = world.get_block_entity(hopper) {
+                block_entity.tick(world);
+            }
+        }
+        let chest_ref = container_at(world, chest);
+        let guard = ContainerLockGuard::lock_all(&[&chest_ref]).expect("lock chest");
+        let inventory = guard.get(chest_ref.container_id()).expect("chest inventory");
+        assert!(
+            (0..27).any(|slot| inventory.get_item(slot).is(&vanilla_items::OAK_LOG)),
+            "hopper chain must collect felled logs into the chest"
+        );
+        drop(guard);
+
+        // Replant through the same bonemeal dispenser after the trunk is gone.
+        // TNT can destroy the adjacent dispenser/soil in this minimal rig; a real
+        // farm keeps them behind blast-resistant blocks, so rebuild the station.
+        world.set_block(soil, vanilla_blocks::DIRT.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(
+            bonemeal_dispenser.above(),
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        );
+        world.set_block(bonemeal_dispenser, face_west, UpdateFlags::UPDATE_ALL);
+        set_slot(
+            &world,
+            bonemeal_dispenser,
+            0,
+            ItemStack::new(&vanilla_items::OAK_SAPLING),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
+            face_west,
+            world,
+            bonemeal_dispenser,
+        );
+        assert_eq!(
+            world.get_block_state(sapling).get_block(),
+            &vanilla_blocks::OAK_SAPLING,
+            "tree farm must replant the sapling after felling"
+        );
     }
 
     #[test]

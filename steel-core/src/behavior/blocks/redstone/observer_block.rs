@@ -39,26 +39,10 @@ impl ObserverBlock {
         &self,
         ticks: &dyn ScheduledTickAccess,
         pos: BlockPos,
-        state: BlockStateId,
+        _state: BlockStateId,
     ) {
         if !ticks.has_scheduled_block_tick(pos, self.block) {
-            // Two observers facing each other schedule the same 2gt pulse. When the
-            // engine batches both updates in one tick they would flip in lockstep.
-            // Give the opposite-facing half a one-tick phase offset so a real
-            // observer pair starts as a clock instead of stalling after one pulse.
-            let facing = state.get_value(FACING);
-            let facing_observer = ticks
-                .get_block_state(pos.relative(facing))
-                .get_block()
-                == self.block;
-            let delay = if facing_observer
-                && matches!(facing, Direction::West | Direction::South)
-            {
-                PULSE_DELAY + 1
-            } else {
-                PULSE_DELAY
-            };
-            ticks.schedule_block_tick_default(pos, self.block, delay);
+            ticks.schedule_block_tick_default(pos, self.block, PULSE_DELAY);
         }
     }
 
@@ -283,46 +267,50 @@ mod tests {
 
         init_vanilla_registry();
         crate::behavior::init_behaviors();
-        let fixture = fresh_test_world("observer_pair_clock");
-        let world = &fixture.world;
-        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
-        let a = BlockPos::new(8, 64, 8);
-        let b = BlockPos::new(9, 64, 8);
-        let state_a = observer_state(Direction::East, false);
-        let state_b = observer_state(Direction::West, false);
-        world.set_block(a, state_a, UpdateFlags::UPDATE_ALL);
-        world.set_block(b, state_b, UpdateFlags::UPDATE_ALL);
-        let observer = ObserverBlock::new(&vanilla_blocks::OBSERVER);
-        observer.update_shape(
-            state_a,
-            world,
-            a,
-            Direction::East,
-            b,
-            state_b,
-        );
-        observer.update_shape(
-            state_b,
-            world,
-            b,
-            Direction::West,
-            a,
-            state_a,
-        );
 
-        let mut last = world.get_block_state(a).get_value(POWERED);
-        let mut flips = 0;
-        for tick in 0..80_u64 {
-            tick_test_world(world, tick, true);
-            let now = world.get_block_state(a).get_value(POWERED);
-            if now != last {
-                flips += 1;
-                last = now;
+        // Both axes must oscillate; a clock that only works west/east would be a
+        // directional phase hack rather than vanilla observer behavior.
+        for (name, a, b, facing_a, facing_b) in [
+            (
+                "observer_pair_clock_ew",
+                BlockPos::new(8, 64, 8),
+                BlockPos::new(9, 64, 8),
+                Direction::East,
+                Direction::West,
+            ),
+            (
+                "observer_pair_clock_ns",
+                BlockPos::new(8, 64, 8),
+                BlockPos::new(8, 64, 9),
+                Direction::South,
+                Direction::North,
+            ),
+        ] {
+            let fixture = fresh_test_world(name);
+            let world = &fixture.world;
+            insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+            let state_a = observer_state(facing_a, false);
+            let state_b = observer_state(facing_b, false);
+            world.set_block(a, state_a, UpdateFlags::UPDATE_ALL);
+            world.set_block(b, state_b, UpdateFlags::UPDATE_ALL);
+            let observer = ObserverBlock::new(&vanilla_blocks::OBSERVER);
+            observer.update_shape(state_a, world, a, facing_a, b, state_b);
+            observer.update_shape(state_b, world, b, facing_b, a, state_a);
+
+            let mut last = world.get_block_state(a).get_value(POWERED);
+            let mut flips = 0;
+            for tick in 0..200_u64 {
+                tick_test_world(world, tick, true);
+                let now = world.get_block_state(a).get_value(POWERED);
+                if now != last {
+                    flips += 1;
+                    last = now;
+                }
             }
+            assert!(
+                flips >= 8,
+                "{name}: two facing observers must keep toggling for 200gt, got {flips} flips"
+            );
         }
-        assert!(
-            flips >= 2,
-            "two facing observers must keep toggling, got {flips} flips"
-        );
     }
 }
