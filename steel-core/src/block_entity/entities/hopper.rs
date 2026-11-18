@@ -18,7 +18,7 @@ use simdnbt::borrow::NbtCompound as NbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{BlockStateProperties, BoolProperty};
-use steel_registry::{vanilla_block_entity_types, vanilla_entities};
+use steel_registry::{item_stack::ItemStack, vanilla_block_entity_types, vanilla_blocks, vanilla_entities};
 use steel_utils::{
     BlockPos, BlockStateId, Downcast as _, DowncastType, DowncastTypeKey, WorldAabb,
     locks::SyncMutex, nbt::NbtValueInput as _, translations,
@@ -156,9 +156,64 @@ impl HopperBlockEntity {
         }
     }
 
+    /// Feeds one compostable item from this hopper into the composter it faces.
+    fn push_into_composter(&self, world: &Arc<World>, target_pos: BlockPos) -> bool {
+        let own = self.storage.container_ref.clone();
+        let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) else {
+            return false;
+        };
+        let Some(stack) = guard.get(own.container_id()).map(|container| container.get_item(0).clone()) else {
+            return false;
+        };
+        if !crate::behavior::blocks::building::is_compostable(&stack)
+            || !crate::behavior::blocks::building::try_compost(world, target_pos, &stack)
+        {
+            return false;
+        }
+        let remaining = stack.count() - 1;
+        let replacement = if remaining <= 0 {
+            ItemStack::empty()
+        } else {
+            stack.copy_with_count(remaining)
+        };
+        if let Some(container) = guard.get_mut(own.container_id()) {
+            container.set_item(0, replacement);
+        }
+        true
+    }
+
+    /// Pulls one bone meal out of a ready composter above this hopper.
+    fn pull_from_composter(&self, world: &Arc<World>, source_pos: BlockPos) -> bool {
+        let Some(bone_meal) =
+            crate::behavior::blocks::building::harvest_bone_meal(world, source_pos)
+        else {
+            return false;
+        };
+        let own = self.storage.container_ref.clone();
+        let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) else {
+            return false;
+        };
+        let leftover = insert_stack(&mut guard, own.container_id(), bone_meal);
+        if leftover.is_empty() {
+            true
+        } else {
+            // The hopper could not accept the output: restore the ready state.
+            let state = world.get_block_state(source_pos);
+            world.set_block(
+                source_pos,
+                state.set_value(&steel_registry::blocks::properties::BlockStateProperties::LEVEL_COMPOSTER, 8),
+                steel_utils::types::UpdateFlags::UPDATE_ALL,
+            );
+            false
+        }
+    }
+
     /// Moves at most one item into the container this hopper faces.
     fn push_one(&self, world: &Arc<World>, facing: steel_registry::blocks::properties::Direction) -> bool {
         let target_pos = self.get_block_pos().relative(facing);
+        if world.get_block_state(target_pos).get_block() == &vanilla_blocks::COMPOSTER {
+            return self.push_into_composter(world, target_pos);
+        }
         let Some(target_entity) = world.get_block_entity(target_pos) else {
             return false;
         };
@@ -192,6 +247,9 @@ impl HopperBlockEntity {
     /// Moves at most one item out of the container above this hopper.
     fn pull_one(&self, world: &Arc<World>) -> bool {
         let source_pos = self.get_block_pos().above();
+        if world.get_block_state(source_pos).get_block() == &vanilla_blocks::COMPOSTER {
+            return self.pull_from_composter(world, source_pos);
+        }
         let Some(source_entity) = world.get_block_entity(source_pos) else {
             return false;
         };
@@ -373,5 +431,59 @@ mod tests {
 
         assert_eq!(target_container.lock().get_item(0).count(), 1);
         assert_eq!(target_container.lock().get_item(1).count(), 1);
+    }
+
+    #[test]
+    fn hopper_feeds_composter_and_collects_bone_meal() {
+        use steel_registry::{init_vanilla_registry, vanilla_blocks};
+        use steel_utils::{BlockPos, ChunkPos, types::UpdateFlags};
+
+        use crate::behavior::init_behaviors;
+        use crate::block_entity::init_block_entities;
+        use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
+
+        init_vanilla_registry();
+        init_behaviors();
+        init_block_entities();
+        let fixture = fresh_test_world("hopper_composter");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let top_pos = BlockPos::new(8, 65, 8);
+        let composter_pos = BlockPos::new(8, 64, 8);
+        let bottom_pos = BlockPos::new(8, 63, 8);
+        let chest_pos = BlockPos::new(8, 62, 8);
+        world.set_block(top_pos, vanilla_blocks::HOPPER.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(composter_pos, vanilla_blocks::COMPOSTER.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(bottom_pos, vanilla_blocks::HOPPER.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(chest_pos, vanilla_blocks::CHEST.default_state(), UpdateFlags::UPDATE_ALL);
+
+        let top = world.get_block_entity(top_pos).expect("top hopper");
+        let top_ref = ContainerRef::from_block_entity(top).expect("top container");
+        {
+            let mut guard = ContainerLockGuard::lock_all(&[&top_ref]).expect("lock top");
+            guard
+                .get_mut(top_ref.container_id())
+                .expect("top inventory")
+                .set_item(0, ItemStack::with_count(&vanilla_items::OAK_SAPLING, 8));
+        }
+
+        for _ in 0..120 {
+            if let Some(hopper) = world.get_block_entity(top_pos) {
+                hopper.tick(world);
+            }
+            if let Some(hopper) = world.get_block_entity(bottom_pos) {
+                hopper.tick(world);
+            }
+        }
+
+        let chest = world.get_block_entity(chest_pos).expect("chest");
+        let chest_ref = ContainerRef::from_block_entity(chest).expect("chest container");
+        let guard = ContainerLockGuard::lock_all(&[&chest_ref]).expect("lock chest");
+        let inventory = guard.get(chest_ref.container_id()).expect("chest inventory");
+        assert!(
+            (0..27).any(|slot| inventory.get_item(slot).is(&vanilla_items::BONE_MEAL)),
+            "hopper chain must turn saplings into bone meal in the chest"
+        );
     }
 }
