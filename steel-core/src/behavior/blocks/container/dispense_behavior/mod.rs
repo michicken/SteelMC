@@ -16,12 +16,14 @@ use crate::entity::projectile::ThrowableItemProjectile;
 use crate::world::World;
 
 pub mod armor;
+use entity::SpawnEntityDispenseBehavior;
 pub mod arrow;
 pub mod block_place;
 pub mod bucket;
 pub mod consumables;
 pub mod container;
 pub mod default;
+pub mod entity;
 pub mod firework;
 pub mod potion;
 pub mod projectile;
@@ -107,8 +109,15 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         Box::new(ArrowDispenseBehavior::new(&vanilla_entities::ARROW)),
     );
 
-    // boat
-    // TODO: boats and rafts - need the boat entities.
+    // boats and rafts: the item key and entity key are identical.
+    for (_, item) in REGISTRY.items.iter() {
+        let path = item.key.path.as_ref();
+        if path.ends_with("_boat") || path.ends_with("_raft") {
+            if let Some(entity_type) = REGISTRY.entity_types.by_key(&item.key) {
+                registry.set_behavior(item, Box::new(SpawnEntityDispenseBehavior::new(entity_type)));
+            }
+        }
+    }
 
     // bucket
     registry.set_behavior(
@@ -285,7 +294,10 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
             registry.set_behavior(item, Box::new(SpawnEggDispenseBehavior));
         }
     }
-    // TODO: armor stand - needs the ArmorStand entity.
+    registry.set_behavior(
+        &vanilla_items::ARMOR_STAND,
+        Box::new(entity::armor_stand_behavior()),
+    );
 
     registry
 });

@@ -1,5 +1,6 @@
 //! Non-living entity implementations grouped by behavior.
 
+pub mod armor;
 pub mod display_ui;
 pub mod effects;
 pub mod explosives;

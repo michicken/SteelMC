@@ -6,6 +6,7 @@ pub mod objects;
 pub use mobs::ambient::BatEntity;
 pub use mobs::hostile::{EndermiteEntity, SkeletonEntity, SpiderEntity, ZombieEntity};
 pub use mobs::passive::*;
+pub use objects::armor::ArmorStandEntity;
 pub use objects::display_ui::{BlockDisplayEntity, ItemFrameEntity, LeashFenceKnotEntity};
 pub use objects::effects::AreaEffectCloudEntity;
 pub use objects::explosives::{EndCrystalEntity, PrimedTntEntity};
@@ -16,4 +17,6 @@ pub use objects::projectiles::{
     SplashPotionEntity, ThrownEggEntity, WindChargeEntity,
 };
 pub use objects::technical::{InteractionEntity, MarkerEntity};
-pub use objects::vehicles::{ChestMinecartEntity, MinecartEntity, SpawnerMinecartEntity};
+pub use objects::vehicles::{
+    BoatEntity, ChestBoatEntity, ChestMinecartEntity, MinecartEntity, SpawnerMinecartEntity,
+};

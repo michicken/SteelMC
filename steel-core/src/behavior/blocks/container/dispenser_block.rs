@@ -1158,6 +1158,40 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_spawns_real_boat_and_armor_stand_entities() {
+        let fixture = fixture("dispenser_boat_armor_stand");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::OAK_BOAT),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::OAK_BOAT),
+            1,
+            "oak boat item must spawn a real oak_boat entity"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
+
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::ARMOR_STAND),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::ARMOR_STAND),
+            1,
+            "armor stand item must spawn a real armor_stand entity"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
+    }
+
+    #[test]
     fn dropper_moves_whole_stack_into_container_below() {
         let fixture = fixture("dropper_transfer");
         let state = facing_down(&vanilla_blocks::DROPPER);
