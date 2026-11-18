@@ -8,7 +8,7 @@ mod copper_chest_block;
 mod crafting_table_block;
 mod enchanting_table_block;
 mod dispense_behavior;
-mod dispenser_block;
+pub(crate) mod dispenser_block;
 mod ender_chest_block;
 mod furnace_block;
 mod grindstone_block;

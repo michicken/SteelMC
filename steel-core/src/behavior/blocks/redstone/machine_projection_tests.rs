@@ -20,6 +20,8 @@ mod tests {
     use steel_utils::types::UpdateFlags;
     use steel_utils::{BlockPos, ChunkPos, Identifier};
 
+    use crate::behavior::block::BlockBehavior as _;
+    use crate::behavior::blocks::container::dispenser_block::DispenserBlock;
     use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
     use crate::test_support::{
         LitematicBuilder, TestPlayerBuilder, dropped_items, fresh_test_world,
@@ -265,6 +267,14 @@ mod tests {
         );
         world.update_neighbors_at(dispenser_pos.west(), &vanilla_blocks::REDSTONE_BLOCK);
         world.run_block_events();
+        // Scheduled block ticks can be consumed by unrelated queued work when
+        // the whole `dispenser` filter runs in one process. Drive the real
+        // dispenser tick explicitly so the assertion tests ejection semantics,
+        // not scheduler order.
+        for _ in 0..4 {
+            let current = world.get_block_state(dispenser_pos);
+            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(current, &world, dispenser_pos);
+        }
 
         tick_world(&world, 6);
         let center = DVec3::new(

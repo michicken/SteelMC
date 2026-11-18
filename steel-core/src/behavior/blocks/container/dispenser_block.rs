@@ -1050,6 +1050,37 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_shears_growing_plant_tip() {
+        let fixture = fixture("dispenser_shears");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::TWISTING_VINES.default_state(),
+            UpdateFlags::UPDATE_ALL
+        ));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::SHEARS),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        let after = fixture.world.get_block_state(BELOW_POS);
+        let behavior = crate::behavior::BLOCK_BEHAVIORS.get_behavior(after.get_block());
+        let plant = behavior
+            .as_growing_plant_head()
+            .expect("twisting vines must expose growing plant behavior");
+        assert!(
+            plant.is_max_age(after),
+            "shears dispenser must grow the twisting vines tip to max age"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 1);
+    }
+
+    #[test]
     fn dispenser_primes_tnt_and_spawns_primed_entity() {
         let fixture = fixture("dispenser_tnt");
         let state = facing_down(&vanilla_blocks::DISPENSER);
