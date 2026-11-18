@@ -1,6 +1,6 @@
 use steel_protocol::packets::game::RelativeMovement;
 use steel_registry::blocks::properties::BlockStateProperties;
-use steel_registry::{init_vanilla_registry, vanilla_damage_types, vanilla_entities};
+use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_damage_types, vanilla_entities};
 use steel_utils::random::{Random as _, legacy_random::LegacyRandom};
 use steel_utils::types::UpdateFlags;
 use steel_utils::{ChunkPos, Identifier};
@@ -52,6 +52,31 @@ fn priming_applies_vanilla_float_tau_launch_motion() {
     assert!((velocity.x - EXPECTED_INITIAL_MOTION_X).abs() <= INITIAL_MOTION_TOLERANCE);
     assert_eq!(velocity.y.to_bits(), f64::from(0.2_f32).to_bits());
     assert!((velocity.z - EXPECTED_INITIAL_MOTION_Z).abs() <= INITIAL_MOTION_TOLERANCE);
+}
+
+#[test]
+fn tnt_fuse_destroys_logs_directly_above() {
+    let fixture = ready_tnt_world("tnt_tree_harvest");
+    let world = &fixture.world;
+    let base = BlockPos::new(8, 63, 8);
+    assert!(world.set_block(base, vanilla_blocks::STONE.default_state(), UpdateFlags::UPDATE_ALL));
+    for y in 64..=67 {
+        assert!(world.set_block(
+            BlockPos::new(8, y, 8),
+            vanilla_blocks::OAK_LOG.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        ));
+    }
+    let tnt = primed_tnt(world, BlockPos::new(8, 64, 8).get_bottom_center());
+    tnt.set_fuse(80);
+    for _ in 0..80 {
+        tnt.clone().tick();
+    }
+    assert_ne!(
+        world.get_block_state(BlockPos::new(8, 64, 8)).get_block(),
+        &vanilla_blocks::OAK_LOG,
+        "TNT must fell the tree trunk base"
+    );
 }
 
 #[test]
