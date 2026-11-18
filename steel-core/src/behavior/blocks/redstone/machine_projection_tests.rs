@@ -784,6 +784,230 @@ mod tests {
     }
 
     #[test]
+    fn litematic_dispenser_bonemeal_grows_wheat_to_max_age() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("wheat_bonemeal");
+        let mut builder = LitematicBuilder::new("wheat_bonemeal", (2, 3, 1));
+        builder.set(0, 0, 0, "minecraft:farmland", &[("moisture", "0")]);
+        builder.set(0, 1, 0, "minecraft:wheat", &[("age", "0")]);
+        builder.set(0, 2, 0, "minecraft:dispenser", &[("facing", "down")]);
+        builder.set(1, 2, 0, "minecraft:redstone_block", &[]);
+        let mut bone_meal = NbtCompound::new();
+        bone_meal.insert("Slot", 0i8);
+        bone_meal.insert("id", "minecraft:bone_meal");
+        bone_meal.insert("count", 64i32);
+        let mut dispenser = NbtCompound::new();
+        dispenser.insert("id", "minecraft:dispenser");
+        dispenser.insert("Items", NbtList::Compound(vec![bone_meal]));
+        builder.set_tile_entity(0, 2, 0, dispenser);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_wheat_bonemeal");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        let origin = BlockPos::new(3, 2, 3);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert_eq!(report.tile_entities_loaded, 1);
+
+        let power_pos = origin.offset(1, 2, 0);
+        let dispenser_pos = origin.offset(0, 2, 0);
+        let wheat_pos = origin.offset(0, 1, 0);
+        for _ in 0..16 {
+            world.set_block(
+                power_pos,
+                vanilla_blocks::AIR.default_state(),
+                steel_utils::types::UpdateFlags::UPDATE_CLIENTS
+                    | steel_utils::types::UpdateFlags::UPDATE_NEIGHBORS,
+            );
+            world.update_neighbors_at(power_pos, &vanilla_blocks::REDSTONE_BLOCK);
+            world.update_neighbors_at(dispenser_pos, &vanilla_blocks::DISPENSER);
+            tick_world(&world, 2);
+            world.run_block_events();
+
+            world.set_block(
+                power_pos,
+                vanilla_blocks::REDSTONE_BLOCK.default_state(),
+                steel_utils::types::UpdateFlags::UPDATE_CLIENTS
+                    | steel_utils::types::UpdateFlags::UPDATE_NEIGHBORS,
+            );
+            world.update_neighbors_at(power_pos, &vanilla_blocks::REDSTONE_BLOCK);
+            world.update_neighbors_at(dispenser_pos, &vanilla_blocks::DISPENSER);
+            tick_world(&world, 2);
+            world.run_block_events();
+
+            if world.get_block_state(wheat_pos).get_block() == &vanilla_blocks::WHEAT {
+                let age = world
+                    .get_block_state(wheat_pos)
+                    .get_value(&BlockStateProperties::AGE_7);
+                if age >= 7 {
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(
+            block_id(world.get_block_state(wheat_pos)),
+            Identifier::new_static("minecraft", "wheat"),
+            "wheat must still be planted"
+        );
+        assert_eq!(
+            world
+                .get_block_state(wheat_pos)
+                .get_value(&BlockStateProperties::AGE_7),
+            7,
+            "bone meal dispenser must grow wheat to max age"
+        );
+    }
+
+    #[test]
+    fn litematic_piston_harvests_wheat_and_drops_items() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("wheat_harvest");
+        let mut builder = LitematicBuilder::new("wheat_harvest", (2, 2, 1));
+        builder.set(1, 0, 0, "minecraft:farmland", &[("moisture", "0")]);
+        builder.set(1, 1, 0, "minecraft:wheat", &[("age", "7")]);
+        builder.set(0, 1, 0, "minecraft:piston", &[("facing", "east")]);
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_wheat_harvest");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        let origin = BlockPos::new(4, 2, 4);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+
+        let piston_pos = origin.offset(0, 1, 0);
+        let wheat_pos = origin.offset(1, 1, 0);
+        let power_pos = origin.offset(-1, 1, 0);
+        world.set_block(
+            power_pos,
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            steel_utils::types::UpdateFlags::UPDATE_CLIENTS
+                | steel_utils::types::UpdateFlags::UPDATE_NEIGHBORS,
+        );
+        world.update_neighbors_at(power_pos, &vanilla_blocks::REDSTONE_BLOCK);
+        world.update_neighbors_at(piston_pos, &vanilla_blocks::PISTON);
+        tick_world(&world, 6);
+        world.run_block_events();
+
+        assert_ne!(
+            block_id(world.get_block_state(wheat_pos)),
+            Identifier::new_static("minecraft", "wheat"),
+            "extending piston must break the mature wheat"
+        );
+        let center = DVec3::new(
+            f64::from(wheat_pos.x()) + 0.5,
+            f64::from(wheat_pos.y()) + 0.5,
+            f64::from(wheat_pos.z()) + 0.5,
+        );
+        assert!(
+            !dropped_items(&world, center).is_empty(),
+            "piston-harvested wheat must drop items"
+        );
+    }
+
+    #[test]
+    fn litematic_parallel_furnace_array_smelts_two_columns() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let path = fixture_path("furnace_array");
+        let mut builder = LitematicBuilder::new("furnace_array", (1, 5, 2));
+        for z in 0..2 {
+            builder.set(0, 0, z, "minecraft:barrel", &[("facing", "up")]);
+            builder.set(0, 1, z, "minecraft:hopper", &[("facing", "down")]);
+            builder.set(0, 2, z, "minecraft:furnace", &[("facing", "north")]);
+            builder.set(0, 3, z, "minecraft:hopper", &[("facing", "down")]);
+            builder.set(0, 4, z, "minecraft:chest", &[]);
+
+            let mut input = NbtCompound::new();
+            input.insert("Slot", 0i8);
+            input.insert("id", "minecraft:iron_ore");
+            input.insert("count", 2i32);
+            let mut fuel = NbtCompound::new();
+            fuel.insert("Slot", 1i8);
+            fuel.insert("id", "minecraft:coal");
+            fuel.insert("count", 4i32);
+            let mut furnace = NbtCompound::new();
+            furnace.insert("id", "minecraft:furnace");
+            furnace.insert("Items", NbtList::Compound(vec![input, fuel]));
+            builder.set_tile_entity(0, 2, z, furnace);
+        }
+        builder.write(&path).expect("write litematic fixture");
+
+        let litematic = load_litematic(&path).expect("load litematic fixture");
+        let test_world = fresh_test_world("machine_projection_furnace_array");
+        let world: Arc<_> = Arc::clone(&test_world.world);
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        let origin = BlockPos::new(4, 1, 4);
+        let report = paste_litematic(&world, &litematic, origin);
+        assert!(report.failed_positions.is_empty(), "{:?}", report.failed_positions);
+        assert_eq!(report.tile_entities_loaded, 2);
+
+        let player = TestPlayerBuilder::new(Arc::clone(&world), "FurnaceArray", 7).build();
+        assert!(world.add_player(player, crate::player::ResetReason::InitialJoin));
+
+        for z in 0..2 {
+            assert_eq!(count_at(&world, origin.offset(0, 2, z), 0), 2);
+            assert_eq!(count_at(&world, origin.offset(0, 2, z), 1), 4);
+        }
+
+        for _ in 0..500 {
+            for z in 0..2 {
+                if let Some(block_entity) = world.get_block_entity(origin.offset(0, 2, z)) {
+                    block_entity.tick(&world);
+                }
+            }
+            tick_test_world(&world, 1, true);
+        }
+        for _ in 0..200 {
+            for z in 0..2 {
+                if let Some(block_entity) = world.get_block_entity(origin.offset(0, 1, z)) {
+                    block_entity.tick(&world);
+                }
+            }
+            tick_test_world(&world, 1, true);
+        }
+
+        for z in 0..2 {
+            let result = count_at(&world, origin.offset(0, 2, z), 2);
+            let barrel = count_at(&world, origin.offset(0, 0, z), 0);
+            assert_eq!(
+                barrel + result,
+                2,
+                "column {z} must smelt exactly two ingots (barrel={barrel}, furnace={result})"
+            );
+            assert_eq!(barrel, 2, "column {z} barrel must receive both ingots");
+            let item_id = {
+                let container = container_at(&world, origin.offset(0, 0, z));
+                let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+                guard
+                    .get(container.container_id())
+                    .expect("container")
+                    .get_item(0)
+                    .item()
+                    .key
+                    .clone()
+            };
+            assert_eq!(
+                item_id,
+                Identifier::new_static("minecraft", "iron_ingot"),
+                "column {z} must produce iron ingots"
+            );
+        }
+    }
+
+    #[test]
     fn litematic_multi_region_places_and_loads_tile_entities() {
         steel_registry::init_vanilla_registry();
         crate::behavior::init_behaviors();
