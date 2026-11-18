@@ -97,6 +97,15 @@ impl BlockBehavior for ObserverBlock {
             world.schedule_block_tick_default(pos, self.block, PULSE_DELAY);
         }
         self.update_neighbors_in_front(world, pos, state);
+        // Vanilla observers also let the block they are watching see the
+        // powered-state change; without this two observers facing each other
+        // pulse once and then stall instead of forming a clock.
+        world.update_neighbor_shapes_at(
+            state.set_value(POWERED, !state.get_value(POWERED)),
+            pos,
+            UpdateFlags::UPDATE_CLIENTS,
+            0,
+        );
     }
 
     fn on_place(

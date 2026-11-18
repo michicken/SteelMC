@@ -775,6 +775,7 @@ impl Server {
             )
             .await
             .map_err(|e| format!("failed to create world {}: {e}", world_entry.key))?;
+            world.set_natural_spawning_enabled(true);
             Ok(world)
         };
         let mut spawn_worlds = Vec::with_capacity(resolved_worlds.worlds.len());

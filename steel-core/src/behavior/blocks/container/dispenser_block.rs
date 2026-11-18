@@ -7,8 +7,8 @@
 //!   Vanilla's `DispenserBlock`.
 //! - `TRIGGERED` prevents a dispenser from firing repeatedly while a signal stays high.
 //!
-//! Not yet implemented: Vanilla's per-item dispense table (arrows, eggs, buckets,
-//! bonemeal, TNT, minecarts, ...). Everything currently falls back to ejecting the item.
+//! Implemented dispense table: bonemeal, arrows, snowballs, eggs, TNT, water/lava
+//! buckets and minecarts. Other items fall back to ejecting the item.
 
 use std::sync::{Arc, Weak};
 
@@ -19,13 +19,17 @@ use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{BlockStateProperties, BoolProperty, Direction, EnumProperty};
 use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_block_entity_types;
-use steel_registry::{vanilla_entities, vanilla_items};
+use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
 use steel_utils::{BlockPos, BlockStateId, Downcast as _, types::UpdateFlags};
 
 use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
 use crate::behavior::BlockPlaceContext;
 use crate::block_entity::{BlockEntity as _, BLOCK_ENTITIES, entities::DispenserBlockEntity};
-use crate::entity::{entities::ItemEntity, next_entity_id};
+use crate::entity::entities::{
+    ArrowEntity, ChestMinecartEntity, ItemEntity, MinecartEntity, PrimedTntEntity, SnowballEntity,
+    ThrownEggEntity,
+};
+use crate::entity::{Entity, SharedEntity, next_entity_id};
 use crate::inventory::container::{Container, calculate_redstone_signal_from_containers};
 use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
 use crate::inventory::transfer::insert_stack;
@@ -88,6 +92,38 @@ fn eject_item(world: &Arc<World>, pos: BlockPos, facing: Direction, stack: ItemS
     }
 }
 
+#[derive(Clone, Copy)]
+enum SpecialDispense {
+    Projectile,
+    Tnt,
+    Bucket(BlockStateId),
+    Minecart(bool),
+    Sapling,
+}
+
+fn sapling_state(item: steel_registry::items::ItemRef) -> Option<BlockStateId> {
+    let block = if item == &*vanilla_items::OAK_SAPLING {
+        &vanilla_blocks::OAK_SAPLING
+    } else if item == &*vanilla_items::SPRUCE_SAPLING {
+        &vanilla_blocks::SPRUCE_SAPLING
+    } else if item == &*vanilla_items::BIRCH_SAPLING {
+        &vanilla_blocks::BIRCH_SAPLING
+    } else if item == &*vanilla_items::JUNGLE_SAPLING {
+        &vanilla_blocks::JUNGLE_SAPLING
+    } else if item == &*vanilla_items::ACACIA_SAPLING {
+        &vanilla_blocks::ACACIA_SAPLING
+    } else if item == &*vanilla_items::CHERRY_SAPLING {
+        &vanilla_blocks::CHERRY_SAPLING
+    } else if item == &*vanilla_items::DARK_OAK_SAPLING {
+        &vanilla_blocks::DARK_OAK_SAPLING
+    } else if item == &*vanilla_items::PALE_OAK_SAPLING {
+        &vanilla_blocks::PALE_OAK_SAPLING
+    } else {
+        return None;
+    };
+    Some(block.default_state())
+}
+
 /// Removes the first non-empty stack and either transfers it (dropper) or ejects it.
 fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: bool) {
     let facing = state.get_value(FACING);
@@ -134,6 +170,152 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
     let Some((slot, stack)) = picked else {
         return;
     };
+
+    if !dropper {
+        let special = if stack.item == &*vanilla_items::ARROW
+            || stack.item == &*vanilla_items::SNOWBALL
+            || stack.item == &*vanilla_items::EGG
+        {
+            Some(SpecialDispense::Projectile)
+        } else if stack.item == &*vanilla_items::TNT {
+            Some(SpecialDispense::Tnt)
+        } else if stack.item == &*vanilla_items::WATER_BUCKET {
+            Some(SpecialDispense::Bucket(vanilla_blocks::WATER.default_state()))
+        } else if stack.item == &*vanilla_items::LAVA_BUCKET {
+            Some(SpecialDispense::Bucket(vanilla_blocks::LAVA.default_state()))
+        } else if stack.item == &*vanilla_items::MINECART {
+            Some(SpecialDispense::Minecart(false))
+        } else if stack.item == &*vanilla_items::CHEST_MINECART {
+            Some(SpecialDispense::Minecart(true))
+        } else if sapling_state(stack.item).is_some() {
+            Some(SpecialDispense::Sapling)
+        } else {
+            None
+        };
+
+        if let Some(special) = special {
+            drop(guard);
+            let front = pos.relative(facing);
+            let spawned = match special {
+                SpecialDispense::Projectile => {
+                    let spawn = front.get_center();
+                    let velocity = DVec3::new(
+                        f64::from(facing.offset().0),
+                        f64::from(facing.offset().1),
+                        f64::from(facing.offset().2),
+                    ) * 1.5;
+                    let entity: SharedEntity = if stack.item == &*vanilla_items::ARROW {
+                        let arrow = Arc::new(ArrowEntity::new(
+                            &vanilla_entities::ARROW,
+                            next_entity_id(),
+                            spawn,
+                            Arc::downgrade(world),
+                        ));
+                        arrow.set_velocity(velocity);
+                        arrow
+                    } else if stack.item == &*vanilla_items::SNOWBALL {
+                        let snowball = Arc::new(SnowballEntity::new(
+                            &vanilla_entities::SNOWBALL,
+                            next_entity_id(),
+                            spawn,
+                            Arc::downgrade(world),
+                        ));
+                        snowball.set_velocity(velocity);
+                        snowball
+                    } else {
+                        let egg = Arc::new(ThrownEggEntity::new(
+                            &vanilla_entities::EGG,
+                            next_entity_id(),
+                            spawn,
+                            Arc::downgrade(world),
+                        ));
+                        egg.set_velocity(velocity);
+                        egg
+                    };
+                    world.try_add_entity(entity).is_ok()
+                }
+                SpecialDispense::Tnt => {
+                    let tnt = Arc::new(PrimedTntEntity::primed(
+                        &vanilla_entities::TNT,
+                        next_entity_id(),
+                        front.get_center(),
+                        world,
+                        None,
+                    ));
+                    tnt.set_fuse(PrimedTntEntity::DEFAULT_FUSE_TIME);
+                    world.try_add_entity(tnt).is_ok()
+                }
+                SpecialDispense::Bucket(fluid) => {
+                    if world.get_block_state(front).get_block() == &vanilla_blocks::AIR {
+                        world.set_block(
+                            front,
+                            fluid,
+                            UpdateFlags::UPDATE_CLIENTS | UpdateFlags::UPDATE_NEIGHBORS,
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                }
+                SpecialDispense::Sapling => {
+                    let soil = world.get_block_state(front.below()).get_block();
+                    if world.get_block_state(front).get_block() == &vanilla_blocks::AIR
+                        && (soil == &vanilla_blocks::DIRT
+                            || soil == &vanilla_blocks::GRASS_BLOCK
+                            || soil == &vanilla_blocks::FARMLAND)
+                    {
+                        world.set_block(
+                            front,
+                            sapling_state(stack.item).unwrap_or_else(|| {
+                                vanilla_blocks::OAK_SAPLING.default_state()
+                            }),
+                            UpdateFlags::UPDATE_CLIENTS | UpdateFlags::UPDATE_NEIGHBORS,
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                }
+                SpecialDispense::Minecart(chest) => {
+                    let entity: SharedEntity = if chest {
+                        let cart = ChestMinecartEntity::new(
+                            &vanilla_entities::CHEST_MINECART,
+                            next_entity_id(),
+                            front.get_center(),
+                            Arc::downgrade(world),
+                        );
+                        Arc::new(cart)
+                    } else {
+                        Arc::new(MinecartEntity::new(
+                            &vanilla_entities::MINECART,
+                            next_entity_id(),
+                            front.get_center(),
+                            Arc::downgrade(world),
+                        ))
+                    };
+                    world.try_add_entity(entity).is_ok()
+                }
+            };
+            if spawned {
+                if let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) {
+                    let remaining = stack.count() - 1;
+                    if remaining > 0 {
+                        guard.set_item(own_id, slot, stack.copy_with_count(remaining));
+                    } else if matches!(special, SpecialDispense::Bucket(_)) {
+                        guard.set_item(own_id, slot, ItemStack::new(&vanilla_items::BUCKET));
+                    } else {
+                        guard.remove_item(own_id, slot, stack.count());
+                    }
+                }
+            } else {
+                eject_item(world, pos, facing, stack);
+                if let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) {
+                    guard.remove_item(own_id, slot, 1);
+                }
+            }
+            return;
+        }
+    }
 
     if !dropper && stack.item == &*vanilla_items::BONE_MEAL {
         // Vanilla consumes one bonemeal per activation when the facing block is
@@ -282,7 +464,11 @@ mod tests {
     };
     use steel_utils::{BlockPos, ChunkPos, Downcast as _, types::UpdateFlags};
 
+    use steel_registry::vanilla_entities;
+    use steel_utils::WorldAabb;
+
     use super::{DispenserBlock, DropperBlock, FACING, TRIGGERED};
+    use crate::entity::Entity;
     use crate::behavior::{BlockBehavior, init_behaviors};
     use crate::block_entity::{
         entities::DispenserBlockEntity, init_block_entities,
@@ -361,6 +547,188 @@ mod tests {
                 .downcast_ref::<DispenserBlockEntity>()
                 .is_some()
         );
+    }
+
+    fn entities_in_front(world: &Arc<World>, entity_type: steel_registry::entity_type::EntityTypeRef) -> usize {
+        world
+            .get_entities_in_aabb_matching(
+                &WorldAabb::new(-2.0, -4.0, -2.0, 2.0, 1.0, 2.0),
+                |entity| entity.entity_type() == entity_type,
+            )
+            .len()
+    }
+
+    #[test]
+    fn dispenser_places_lava_bucket_and_chest_minecart_branches() {
+        let first = fixture("dispenser_lava_chest_cart");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&first.world, state, false);
+        set_slot(
+            &first.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::LAVA_BUCKET),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &first.world, DISPENSER_POS);
+        assert_eq!(
+            first.world.get_block_state(BELOW_POS).get_block(),
+            &vanilla_blocks::LAVA,
+            "lava bucket must place lava in front"
+        );
+
+        let second = fixture("dispenser_chest_cart");
+        place_machine(&second.world, facing_down(&vanilla_blocks::DISPENSER), false);
+        set_slot(
+            &second.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::CHEST_MINECART),
+        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER)
+            .tick(facing_down(&vanilla_blocks::DISPENSER), &second.world, DISPENSER_POS);
+        assert_eq!(
+            entities_in_front(&second.world, &vanilla_entities::CHEST_MINECART),
+            1,
+            "chest minecart item must spawn a chest minecart"
+        );
+    }
+
+    #[test]
+    fn dispenser_shoots_arrow_snowball_and_egg_as_projectiles() {
+        for (item, entity_type, name) in [
+            (&*vanilla_items::ARROW, &vanilla_entities::ARROW, "arrow"),
+            (&*vanilla_items::SNOWBALL, &vanilla_entities::SNOWBALL, "snowball"),
+            (&*vanilla_items::EGG, &vanilla_entities::EGG, "egg"),
+        ] {
+            let fixture = fixture(match name {
+                "arrow" => "dispenser_arrow",
+                "snowball" => "dispenser_snowball",
+                _ => "dispenser_egg",
+            });
+            let state = facing_down(&vanilla_blocks::DISPENSER);
+            place_machine(&fixture.world, state, false);
+            set_slot(
+                &fixture.world,
+                DISPENSER_POS,
+                0,
+                ItemStack::with_count(item, 3),
+            );
+
+            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+            assert_eq!(
+                entities_in_front(&fixture.world, entity_type),
+                1,
+                "{name} must be spawned as a projectile entity"
+            );
+            assert_eq!(
+                count_at(&fixture.world, DISPENSER_POS, 0),
+                2,
+                "{name} dispense must consume exactly one item"
+            );
+        }
+    }
+
+    #[test]
+    fn dispenser_plants_sapling_on_soil_for_tree_farm_replanting() {
+        let fixture = fixture("dispenser_sapling");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        let soil_pos = BlockPos::new(0, -2, 0);
+        let sapling_pos = BlockPos::new(0, -1, 0);
+        assert!(fixture.world.set_block(
+            soil_pos,
+            vanilla_blocks::DIRT.default_state(),
+            UpdateFlags::UPDATE_NONE
+        ));
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::with_count(&vanilla_items::OAK_SAPLING, 2),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            fixture.world.get_block_state(sapling_pos).get_block(),
+            &vanilla_blocks::OAK_SAPLING,
+            "dispenser must plant a sapling on dirt"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 1);
+    }
+
+    #[test]
+    fn dispenser_primes_tnt_and_spawns_primed_entity() {
+        let fixture = fixture("dispenser_tnt");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::with_count(&vanilla_items::TNT, 1),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::TNT),
+            1,
+            "TNT must become a primed TNT entity"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
+    }
+
+    #[test]
+    fn dispenser_places_water_bucket_and_keeps_empty_bucket() {
+        let fixture = fixture("dispenser_bucket");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::WATER_BUCKET),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            fixture.world.get_block_state(BELOW_POS).get_block(),
+            &vanilla_blocks::WATER,
+            "water bucket must place water in front"
+        );
+        let container = container_at(&fixture.world, DISPENSER_POS);
+        let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+        let bucket = guard
+            .get(container.container_id())
+            .expect("container")
+            .get_item(0)
+            .clone();
+        assert_eq!(bucket.item, &*vanilla_items::BUCKET, "dispenser must keep the empty bucket");
+    }
+
+    #[test]
+    fn dispenser_spawns_minecart_entity() {
+        let fixture = fixture("dispenser_minecart");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::MINECART),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::MINECART),
+            1,
+            "minecart item must spawn a minecart entity"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
     }
 
     #[test]

@@ -765,6 +765,7 @@ mod conversion;
 pub mod damage;
 pub(crate) mod dismount_helper;
 pub mod entities;
+pub mod natural_spawn;
 #[expect(
     clippy::module_inception,
     reason = "the entity module mirrors vanilla's Entity class and groups its implementation"

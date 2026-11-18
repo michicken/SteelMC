@@ -288,6 +288,8 @@ pub struct World {
     /// Whether the tick rate is running normally (not frozen/paused).
     /// When false, movement validation checks are skipped.
     tick_runs_normally: AtomicBool,
+    /// Whether natural hostile spawning is enabled for this world.
+    natural_spawning_enabled: AtomicBool,
     /// Whether vanilla's scheduled/chunk/block-event tick phase is active.
     handling_tick: AtomicBool,
     /// Ordered, duplicate-suppressing server block events awaiting execution.
@@ -457,6 +459,7 @@ impl World {
                 sea_level,
                 default_gamemode: AtomicI8::new(default_gamemode.into()),
                 tick_runs_normally: AtomicBool::new(true),
+                natural_spawning_enabled: AtomicBool::new(false),
                 handling_tick: AtomicBool::new(false),
                 block_events: SyncMutex::new(BlockEventQueue::default()),
                 neighbor_updater: CollectingNeighborUpdater::new(max_chained_neighbor_updates),
@@ -542,6 +545,19 @@ impl World {
         });
     }
 
+    /// Enables or disables natural hostile spawning for this world.
+    pub fn set_natural_spawning_enabled(&self, enabled: bool) {
+        self.natural_spawning_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns whether natural hostile spawning is enabled.
+    #[must_use]
+    pub fn natural_spawning_enabled(&self) -> bool {
+        self.natural_spawning_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Game tick: weather, time, chunk game tick (broadcasts + random/scheduled ticks),
     /// and player logic (without chunk sending).
     ///
@@ -589,6 +605,13 @@ impl World {
         self.handling_tick.store(false, Ordering::Relaxed);
 
         self.tick_removed_players();
+
+        if runs_normally
+            && self.natural_spawning_enabled.load(std::sync::atomic::Ordering::Relaxed)
+            && tick_count % 20 == 0
+        {
+            crate::entity::natural_spawn::tick_natural_spawns(self, 3);
+        }
 
         let entity_tick = {
             let _span = tracing::trace_span!("entity_tick").entered();
