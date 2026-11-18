@@ -250,6 +250,12 @@ mod tests {
             0,
             ItemStack::with_count(&vanilla_items::STONE, 1),
         );
+        // The projection's neighbor update fires before the slot is populated.
+        // Re-trigger the dispenser from a real neighbor update after seeding the
+        // slot so the test does not depend on a later unrelated update.
+        let dispenser_pos = origin.offset(1, 1, 1);
+        world.update_neighbors_at(dispenser_pos, &vanilla_blocks::DISPENSER);
+        world.run_block_events();
 
         tick_world(&world, 6);
         let center = DVec3::new(
