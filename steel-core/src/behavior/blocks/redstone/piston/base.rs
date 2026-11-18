@@ -873,4 +873,64 @@ mod tests {
                 .is_air()
         );
     }
+
+    #[test]
+    fn sticky_piston_pulls_slime_and_observer_chain_back() {
+        init_vanilla_registry();
+        init_behaviors();
+        let world_fixture = fresh_test_world("sticky_piston_slime_chain");
+        let world = &world_fixture.world;
+        let piston_pos = BlockPos::new(8, 64, 8);
+        let power_pos = piston_pos.west();
+        insert_ready_full_chunk(world, ChunkPos::from_block_pos(piston_pos));
+        let piston_state = vanilla_blocks::STICKY_PISTON
+            .default_state()
+            .set_value(FACING, Direction::East)
+            .set_value(EXTENDED, false);
+        assert!(world.set_block(
+            piston_pos.east(),
+            vanilla_blocks::SLIME_BLOCK.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        ));
+        assert!(world.set_block(
+            piston_pos.relative_n(Direction::East, 2),
+            vanilla_blocks::OBSERVER
+                .default_state()
+                .set_value(&BlockStateProperties::FACING, Direction::West),
+            UpdateFlags::UPDATE_NONE,
+        ));
+        assert!(world.set_block(piston_pos, piston_state, UpdateFlags::UPDATE_NONE));
+        assert!(world.set_block(
+            power_pos,
+            vanilla_blocks::REDSTONE_BLOCK.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        ));
+        world.run_block_events();
+        tick_block_entities(world, 3);
+
+        assert_eq!(
+            world.get_block_state(piston_pos.relative_n(Direction::East, 2)).get_block(),
+            &vanilla_blocks::SLIME_BLOCK,
+            "extension must move the slime one block east"
+        );
+        assert_eq!(
+            world.get_block_state(piston_pos.relative_n(Direction::East, 3)).get_block(),
+            &vanilla_blocks::OBSERVER,
+            "extension must move the observer one block east"
+        );
+
+        assert!(world.remove_block(power_pos, false));
+        world.run_block_events();
+        tick_block_entities(world, 3);
+        assert_eq!(
+            world.get_block_state(piston_pos.east()).get_block(),
+            &vanilla_blocks::SLIME_BLOCK,
+            "retraction must pull the slime back to the piston face"
+        );
+        assert_eq!(
+            world.get_block_state(piston_pos.relative_n(Direction::East, 2)).get_block(),
+            &vanilla_blocks::OBSERVER,
+            "retraction must pull the observer back with the slime"
+        );
+    }
 }

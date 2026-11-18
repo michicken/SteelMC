@@ -79,10 +79,32 @@ impl<'a> PistonStructureResolver<'a> {
             return false;
         }
 
+        // A sticky piston retracting a non-sticky block (an observer, for
+        // example) must also take the sticky block attached behind that block.
+        // Vanilla flying machines rely on this: the observer is in front of
+        // the slime on the pull stroke, so the slime sits on the axis that
+        // normal branching deliberately skips.
+        if !self.extending && !Self::is_sticky(next_state) {
+            let behind = self.start_pos.relative(self.push_direction.opposite());
+            let behind_state = self.level.get_block_state(behind);
+            if Self::is_sticky(behind_state)
+                && !self.add_block_line(behind, self.push_direction)
+            {
+                return false;
+            }
+        }
+
         let mut index = 0;
         while index < self.to_push.len() {
             let pos = self.to_push[index];
-            if Self::is_sticky(self.level.get_block_state(pos)) && !self.add_branching_blocks(pos) {
+            // On retraction the sticky piston must also collect slime blocks
+            // attached to the non-sticky block directly in front of its head.
+            // Vanilla's moving-block chain does this through slime branching;
+            // without it a piston pulls the observer back but leaves the slime
+            // behind, which breaks every observer flying machine.
+            if (Self::is_sticky(self.level.get_block_state(pos)) || !self.extending)
+                && !self.add_branching_blocks(pos)
+            {
                 return false;
             }
             index += 1;

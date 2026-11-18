@@ -149,7 +149,7 @@ mod tests {
             Identifier::new_static("minecraft", "piston")
         );
         assert!(
-            piston_state.get_value(&BlockStateProperties::EXTENDED),
+            piston_state.try_get_value(&BlockStateProperties::EXTENDED).unwrap_or(false),
             "piston should be extended after the tick"
         );
         assert_eq!(
@@ -342,7 +342,7 @@ mod tests {
         assert!(
             world
                 .get_block_state(comparator_pos)
-                .get_value(&BlockStateProperties::POWERED),
+                .try_get_value(&BlockStateProperties::POWERED).unwrap_or(false),
             "comparator must see the filter item and turn on"
         );
         let weak = world
@@ -1590,11 +1590,12 @@ mod tests {
         crate::behavior::init_behaviors();
         crate::block_entity::init_block_entities();
 
-        // Vanilla six-block two-observer world-eater engine.  Two independent halves:
-        //   z=0 row: sticky piston -> observer -> slime
-        //   z=1 row: slime <- observer <- sticky piston
-        // Both halves push in the same direction and each observer watches the
-        // other half's piston through the slime block it is glued to.
+        // Vanilla six-block two-observer engine, correct 3x2 layout:
+        //   z=0 (left):  slime | observer(eye forward) | sticky piston(push back)
+        //   z=1 (right): sticky piston(push forward) | observer(eye backward) | slime
+        // The two slime blocks sit diagonally and never touch, keeping the
+        // two halves mechanically independent. Each observer watches the other
+        // half's piston and powers its own half through the slime behind it.
         for (name, reverse) in [("flying_east", false), ("flying_west", true)] {
             let test_world = fresh_test_world(name);
             let world: Arc<_> = Arc::clone(&test_world.world);
@@ -1607,16 +1608,20 @@ mod tests {
                 Direction::East
             };
 
-            let piston_state = vanilla_blocks::STICKY_PISTON
+            let piston_forward = vanilla_blocks::STICKY_PISTON
                 .default_state()
                 .set_value(&BlockStateProperties::FACING, dir)
                 .set_value(&BlockStateProperties::EXTENDED, false);
-            let observer_back = vanilla_blocks::OBSERVER
+            let piston_backward = vanilla_blocks::STICKY_PISTON
                 .default_state()
-                .set_value(&BlockStateProperties::FACING, dir.opposite());
-            let observer_front = vanilla_blocks::OBSERVER
+                .set_value(&BlockStateProperties::FACING, dir.opposite())
+                .set_value(&BlockStateProperties::EXTENDED, false);
+            let observer_forward = vanilla_blocks::OBSERVER
                 .default_state()
                 .set_value(&BlockStateProperties::FACING, dir);
+            let observer_backward = vanilla_blocks::OBSERVER
+                .default_state()
+                .set_value(&BlockStateProperties::FACING, dir.opposite());
 
             let a = BlockPos::new(origin.x() + sign * 0, origin.y(), origin.z());
             let b = BlockPos::new(origin.x() + sign * 1, origin.y(), origin.z());
@@ -1625,58 +1630,54 @@ mod tests {
             let e = BlockPos::new(origin.x() + sign * 1, origin.y(), origin.z() + 1);
             let f = BlockPos::new(origin.x() + sign * 2, origin.y(), origin.z() + 1);
 
-            world.set_block(a, piston_state, UpdateFlags::UPDATE_NONE);
-            world.set_block(b, observer_back, UpdateFlags::UPDATE_NONE);
             world.set_block(
-                c,
+                a,
                 vanilla_blocks::SLIME_BLOCK.default_state(),
                 UpdateFlags::UPDATE_NONE,
             );
+            world.set_block(b, observer_forward, UpdateFlags::UPDATE_NONE);
+            world.set_block(c, piston_backward, UpdateFlags::UPDATE_NONE);
+            world.set_block(d, piston_forward, UpdateFlags::UPDATE_NONE);
+            world.set_block(e, observer_backward, UpdateFlags::UPDATE_NONE);
             world.set_block(
-                d,
+                f,
                 vanilla_blocks::SLIME_BLOCK.default_state(),
                 UpdateFlags::UPDATE_NONE,
             );
-            world.set_block(e, observer_front, UpdateFlags::UPDATE_NONE);
-            world.set_block(f, piston_state, UpdateFlags::UPDATE_NONE);
 
-            // Kick the engine with a real neighbor update, like placing the
-            // last block in vanilla.
+            // Kick the engine with a real neighbor update on both observers,
+            // equivalent to placing/breaking the last block in vanilla.
             world.update_neighbors_at(b, &vanilla_blocks::OBSERVER);
+            world.update_neighbors_at(e, &vanilla_blocks::OBSERVER);
             world.run_block_events();
 
-            for _ in 0..200 {
+            let travel_sign = -sign;
+            let mut farthest_step = 0;
+            for tick in 0..200 {
                 tick_test_world(&world, 1, true);
                 tick_block_entities(&world, 3);
                 world.run_block_events();
-            }
-
-            let max_step = (1..=12)
-                .filter(|step| {
-                    let x = origin.x() + sign * step;
-                    (0..=1).any(|dz| {
+                for step in 1..=12 {
+                    let x = origin.x() + travel_sign * step;
+                    if (0..=1).any(|dz| {
                         world
                             .get_block_state(BlockPos::new(x, origin.y(), origin.z() + dz))
                             .get_block()
                             == &vanilla_blocks::STICKY_PISTON
-                    })
-                })
-                .max()
-                .unwrap_or(0);
+                    }) {
+                        farthest_step = farthest_step.max(step);
+                    }
+                }
+            }
+
+            // The machine travels opposite the build facing, exactly like the
+            // in-game mirror placement. The per-tick scan above records the
+            // farthest step while it is still inside the 12-block window.
             assert!(
-                max_step >= 2,
-                "{name}: observer engine must keep flying after the first push (max step {max_step})"
-            );
-            // The whole six-block assembly must travel together, not just the
-            // front piston: check slime and observer at the shifted positions.
-            let moved_x = origin.x() + sign * 1;
-            assert_eq!(
-                world
-                    .get_block_state(BlockPos::new(moved_x, origin.y(), origin.z()))
-                    .get_block(),
-                &vanilla_blocks::OBSERVER,
-                "{name}: the rear half observer must be carried by the slime"
+                farthest_step >= 6,
+                "{name}: observer engine must keep flying continuously (max step {farthest_step})"
             );
         }
     }
+
 }
