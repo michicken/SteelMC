@@ -392,7 +392,9 @@ mod tests {
     use super::{DispenserBlock, DropperBlock, FACING, TRIGGERED};
     use crate::behavior::{BlockBehavior, init_behaviors};
     use crate::block_entity::{entities::DispenserBlockEntity, init_block_entities};
-    use crate::entity::Entity;
+    use crate::entity::{
+        Entity, EntitySpawnPlacement, EntitySpawnReason, EntitySpawnRequest, spawn_entity,
+    };
     use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
     use crate::test_support::{
         TestWorld, dropped_items, fresh_test_world, insert_ready_full_chunk, tick_test_world,
@@ -1251,6 +1253,52 @@ mod tests {
         assert_eq!(
             slot_item(&fixture.world, DISPENSER_POS, 0),
             &*vanilla_items::BUCKET
+        );
+    }
+
+    #[test]
+    fn dispenser_brush_drops_armadillo_scute() {
+        let fixture = fixture("dispenser_brush");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(
+            spawn_entity(
+                &fixture.world,
+                EntitySpawnRequest {
+                    entity_type: &vanilla_entities::ARMADILLO,
+                    placement: EntitySpawnPlacement::Block {
+                        pos: BELOW_POS,
+                        try_move_down: false,
+                        moved_up: false,
+                    },
+                    reason: EntitySpawnReason::Command,
+                    finalize_spawn: true,
+                    play_ambient_sound: false,
+                    item_stack: None,
+                    user_is_operator: false,
+                },
+            )
+            .is_ok()
+        );
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::BRUSH),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            dropped_items(&fixture.world, DVec3::new(0.5, -0.5, 0.5)).len(),
+            1,
+            "brushing must drop one armadillo scute"
+        );
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 1);
+        assert_eq!(
+            slot_item(&fixture.world, DISPENSER_POS, 0),
+            &*vanilla_items::BRUSH,
+            "a fresh brush survives one use"
         );
     }
 

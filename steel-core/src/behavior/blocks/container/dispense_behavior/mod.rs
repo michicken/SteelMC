@@ -16,9 +16,11 @@ use crate::entity::projectile::ThrowableItemProjectile;
 use crate::world::World;
 
 pub mod armor;
+use brush::BrushDispenseBehavior;
 use entity::SpawnEntityDispenseBehavior;
 use mob_bucket::MobBucketDispenseBehavior;
 pub mod arrow;
+pub mod brush;
 pub mod block_place;
 pub mod bucket;
 pub mod consumables;
@@ -138,6 +140,8 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         &vanilla_items::BUCKET,
         Box::new(EmptyBucketDispenseBehavior),
     );
+    registry.set_behavior(&vanilla_items::BRUSH, Box::new(BrushDispenseBehavior));
+
     // mob buckets: spawn the captured entity and leave an empty bucket.
     for item in [
         &vanilla_items::AXOLOTL_BUCKET,
@@ -281,7 +285,6 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         Box::new(FlintAndSteelDispenseBehavior),
     );
     registry.set_behavior(&vanilla_items::SHEARS, Box::new(ShearsDispenseBehavior));
-    // TODO: brush - needs the Armadillo entity.
 
     // container
     for item in REGISTRY.items.iter_tag(&ItemTag::SHULKER_BOXES) {
