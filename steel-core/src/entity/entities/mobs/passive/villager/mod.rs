@@ -1,6 +1,9 @@
 use std::sync::Weak;
 
 mod brain;
+mod merchant;
+
+pub use merchant::{MerchantOffer, TradeError, TradeOutcome, level_for_xp};
 
 use glam::DVec3;
 use rand::Rng;
@@ -11,7 +14,7 @@ use steel_protocol::packets::game::SoundSource;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::VillagerEntityData;
-use steel_registry::{sound_events, vanilla_attributes};
+use steel_registry::{REGISTRY, RegistryExt as _, sound_events, vanilla_attributes};
 use steel_utils::locks::SyncMutex;
 use steel_utils::nbt::NbtValueInput as _;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
@@ -41,6 +44,14 @@ pub struct VillagerEntity {
     entity_data: SyncMutex<VillagerEntityData>,
     village_ticks: SyncMutex<i32>,
     brain: SyncMutex<crate::entity::ai::brain::container::Brain>,
+    /// The workstation this villager has claimed, if any.  Vanilla keeps the
+    /// claim as a POI ticket in addition to the `JOB_SITE` memory.
+    claimed_job_site: SyncMutex<Option<BlockPos>>,
+    /// Current merchant offers.  Vanilla generates a fresh set when the
+    /// profession is acquired (and on level-up).
+    offers: SyncMutex<Vec<MerchantOffer>>,
+    /// Cumulative trade XP used for profession level-ups.
+    trade_xp: SyncMutex<i32>,
 }
 
 // SAFETY: The owner-scoped type key uniquely identifies VillagerEntity.
@@ -96,11 +107,151 @@ impl VillagerEntity {
             entity_data: SyncMutex::new(entity_data),
             village_ticks: SyncMutex::new(0),
             brain: brain::new_villager_brain(),
+            claimed_job_site: SyncMutex::new(None),
+            offers: SyncMutex::new(Vec::new()),
+            trade_xp: SyncMutex::new(0),
         }
     }
 
     fn update_dirty_mob_effect_entity_data(&self) {
         sync_dirty_mob_effects(&self.living_base, &self.entity_data);
+    }
+
+    /// Returns the villager's current profession registry ID.
+    #[must_use]
+    pub fn profession_id(&self) -> i32 {
+        self.entity_data.lock().villager_data.get().profession
+    }
+
+    /// Returns the villager's current trading level (1-5).
+    #[must_use]
+    pub fn villager_level(&self) -> i32 {
+        self.entity_data.lock().villager_data.get().level
+    }
+
+    /// Returns the claimed workstation position.
+    #[must_use]
+    pub fn claimed_job_site(&self) -> Option<BlockPos> {
+        *self.claimed_job_site.lock()
+    }
+
+    /// Returns a snapshot of the current offers.
+    #[must_use]
+    pub fn trade_offers(&self) -> Vec<MerchantOffer> {
+        self.offers.lock().clone()
+    }
+
+    /// Rebuilds the offer list from the vanilla table for `profession_id`.
+    fn refresh_trade_offers(&self, profession_id: i32) {
+        let path = usize::try_from(profession_id)
+            .ok()
+            .and_then(|id| REGISTRY.villager_professions.by_id(id))
+            .map(|profession| profession.key.path.to_string());
+        let offers = path
+            .as_deref()
+            .map_or_else(Vec::new, merchant::level_one_offers);
+        *self.offers.lock() = offers;
+    }
+
+    /// Executes one merchant offer against a real player inventory.
+    ///
+    /// This is the same settlement path a merchant menu uses: it validates the
+    /// wanted stacks, removes them, inserts the result and advances trade XP.
+    pub fn trade_with(
+        &self,
+        player: &crate::player::Player,
+        index: usize,
+    ) -> Result<TradeOutcome, TradeError> {
+        let before_level = self.villager_level();
+        let mut offers = self.offers.lock();
+        let mut outcome = merchant::execute_trade(&mut offers, player, index)?;
+        drop(offers);
+
+        self.add_trade_xp(outcome.xp);
+        outcome.level_ups = self.villager_level() - before_level;
+        Ok(outcome)
+    }
+
+    fn add_trade_xp(&self, amount: i32) {
+        if amount == 0 {
+            return;
+        }
+        let mut xp = self.trade_xp.lock();
+        *xp = xp.saturating_add(amount);
+        let level = merchant::level_for_xp(*xp);
+        let mut data = self.entity_data.lock();
+        let mut villager_data = data.villager_data.get().clone();
+        if villager_data.level != level {
+            villager_data.level = level;
+            data.villager_data.set(villager_data);
+        }
+    }
+
+    /// Sets the synced profession.  Vanilla also clears the workstation claim
+    /// when the profession changes, so a villager cannot keep a job site that
+    /// belongs to another profession.
+    pub fn set_profession(&self, profession_id: i32) {
+        let mut data = self.entity_data.lock();
+        let mut villager_data = data.villager_data.get().clone();
+        if villager_data.profession == profession_id {
+            drop(data);
+            if self.offers.lock().is_empty() {
+                self.refresh_trade_offers(profession_id);
+            }
+            return;
+        }
+        villager_data.profession = profession_id;
+        villager_data.level = 1;
+        data.villager_data.set(villager_data);
+        drop(data);
+        *self.trade_xp.lock() = 0;
+        self.refresh_trade_offers(profession_id);
+    }
+
+    /// Assigns the profession implied by a workstation POI and reserves its
+    /// ticket, mirroring vanilla `Villager.acquirePoi`.
+    ///
+    /// Returns `true` when the villager newly claimed the site.
+    pub fn claim_job_site(&self, world: &World, site: BlockPos) -> bool {
+        let Some(poi_type) = world.poi_storage.lock().get_type(site) else {
+            return false;
+        };
+        let Some(profession) = brain::profession_for_workstation_poi(poi_type) else {
+            return false;
+        };
+        let Some(profession_id) = REGISTRY
+            .villager_professions
+            .id_from_key(&profession.key)
+            .and_then(|id| i32::try_from(id).ok())
+        else {
+            return false;
+        };
+
+        let mut claimed = self.claimed_job_site.lock();
+        if *claimed == Some(site) {
+            // Already claimed: make sure the synced profession still matches
+            // (a reloaded entity can lose the data value before the claim).
+            self.set_profession(profession_id);
+            return false;
+        }
+
+        if !world.poi_storage.lock().reserve_ticket(site) {
+            return false;
+        }
+        if let Some(old) = *claimed {
+            let _ = world.poi_storage.lock().release_ticket(old);
+        }
+        *claimed = Some(site);
+        self.set_profession(profession_id);
+        true
+    }
+
+    /// Releases the workstation claim, e.g. when a POI is broken or the
+    /// villager is removed.
+    pub fn release_job_site(&self, world: &World) {
+        if let Some(site) = self.claimed_job_site.lock().take() {
+            let _ = world.poi_storage.lock().release_ticket(site);
+        }
     }
 }
 
@@ -214,6 +365,13 @@ impl LivingEntity for VillagerEntity {
         {
             let time = world.game_time();
             self.brain.lock().tick(mob, &world, time);
+
+            // Convert the brain's remembered workstation into a real POI claim
+            // and a synced profession, exactly like vanilla's job-site sensor.
+            let remembered = self.brain.lock().memories().get(&brain::JOB_SITE).copied();
+            if let Some(site) = remembered {
+                self.claim_job_site(&world, site.0);
+            }
         }
         let due = {
             let mut ticks = self.village_ticks.lock();

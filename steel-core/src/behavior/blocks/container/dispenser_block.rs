@@ -16,15 +16,17 @@ use glam::DVec3;
 use steel_macros::block_behavior;
 use steel_registry::blocks::BlockRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
-use steel_registry::blocks::properties::{BlockStateProperties, BoolProperty, Direction, EnumProperty};
+use steel_registry::blocks::properties::{
+    BlockStateProperties, BoolProperty, Direction, EnumProperty,
+};
 use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_block_entity_types;
 use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
 use steel_utils::{BlockPos, BlockStateId, Downcast as _, types::UpdateFlags};
 
-use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
 use crate::behavior::BlockPlaceContext;
-use crate::block_entity::{BlockEntity as _, BLOCK_ENTITIES, entities::DispenserBlockEntity};
+use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
+use crate::block_entity::{BLOCK_ENTITIES, BlockEntity as _, entities::DispenserBlockEntity};
 use crate::entity::entities::{
     ArrowEntity, ChestMinecartEntity, ItemEntity, MinecartEntity, PrimedTntEntity, SnowballEntity,
     ThrownEggEntity,
@@ -76,8 +78,8 @@ fn eject_item(world: &Arc<World>, pos: BlockPos, facing: Direction, stack: ItemS
         return;
     }
     let (dx, dy, dz) = facing.offset();
-    let velocity = DVec3::new(f64::from(dx), f64::from(dy), f64::from(dz)) * 0.5
-        + DVec3::new(0.0, 0.1, 0.0);
+    let velocity =
+        DVec3::new(f64::from(dx), f64::from(dy), f64::from(dz)) * 0.5 + DVec3::new(0.0, 0.1, 0.0);
     let entity = Arc::new(ItemEntity::with_item_and_velocity(
         &vanilla_entities::ITEM,
         next_entity_id(),
@@ -156,7 +158,10 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
     };
     let mut picked: Option<(usize, ItemStack)> = None;
     for slot in 0..size {
-        let Some(stack) = guard.get(own_id).map(|container| container.get_item(slot).clone()) else {
+        let Some(stack) = guard
+            .get(own_id)
+            .map(|container| container.get_item(slot).clone())
+        else {
             return;
         };
         if !stack.is_empty() {
@@ -192,9 +197,8 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
                     {
                         world.set_block(
                             front,
-                            sapling_state(stack.item).unwrap_or_else(|| {
-                                vanilla_blocks::OAK_SAPLING.default_state()
-                            }),
+                            sapling_state(stack.item)
+                                .unwrap_or_else(|| vanilla_blocks::OAK_SAPLING.default_state()),
                             UpdateFlags::UPDATE_CLIENTS | UpdateFlags::UPDATE_NEIGHBORS,
                         );
                         true
@@ -243,8 +247,7 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
         // Everything below is the vanilla per-item dispense table, merged from
         // upstream PR #663 and keyed by item id.
         drop(guard);
-        let behavior =
-            super::dispense_behavior::DISPENSE_BEHAVIORS.get_behavior(stack.item);
+        let behavior = super::dispense_behavior::DISPENSE_BEHAVIORS.get_behavior(stack.item);
         let remaining = behavior.dispense(world, pos, state, stack.clone());
         if let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) {
             if remaining.is_empty() {
@@ -387,13 +390,13 @@ mod tests {
     use steel_utils::WorldAabb;
 
     use super::{DispenserBlock, DropperBlock, FACING, TRIGGERED};
-    use crate::entity::Entity;
     use crate::behavior::{BlockBehavior, init_behaviors};
-    use crate::block_entity::{
-        entities::DispenserBlockEntity, init_block_entities,
-    };
+    use crate::block_entity::{entities::DispenserBlockEntity, init_block_entities};
+    use crate::entity::Entity;
     use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
-    use crate::test_support::{TestWorld, dropped_items, fresh_test_world, insert_ready_full_chunk, tick_test_world};
+    use crate::test_support::{
+        TestWorld, dropped_items, fresh_test_world, insert_ready_full_chunk, tick_test_world,
+    };
     use crate::world::World;
 
     const DISPENSER_POS: BlockPos = BlockPos::new(0, 0, 0);
@@ -417,7 +420,11 @@ mod tests {
             .set_value(TRIGGERED, false)
     }
 
-    fn place_machine(world: &Arc<World>, state: steel_utils::BlockStateId, with_barrel_below: bool) {
+    fn place_machine(
+        world: &Arc<World>,
+        state: steel_utils::BlockStateId,
+        with_barrel_below: bool,
+    ) {
         if with_barrel_below {
             assert!(world.set_block(
                 BELOW_POS,
@@ -469,7 +476,10 @@ mod tests {
         );
     }
 
-    fn entities_in_front(world: &Arc<World>, entity_type: steel_registry::entity_type::EntityTypeRef) -> usize {
+    fn entities_in_front(
+        world: &Arc<World>,
+        entity_type: steel_registry::entity_type::EntityTypeRef,
+    ) -> usize {
         world
             .get_entities_in_aabb_matching(
                 &WorldAabb::new(-2.0, -4.0, -2.0, 2.0, 1.0, 2.0),
@@ -497,15 +507,22 @@ mod tests {
         );
 
         let second = fixture("dispenser_chest_cart");
-        place_machine(&second.world, facing_down(&vanilla_blocks::DISPENSER), false);
+        place_machine(
+            &second.world,
+            facing_down(&vanilla_blocks::DISPENSER),
+            false,
+        );
         set_slot(
             &second.world,
             DISPENSER_POS,
             0,
             ItemStack::new(&vanilla_items::CHEST_MINECART),
         );
-        DispenserBlock::new(&vanilla_blocks::DISPENSER)
-            .tick(facing_down(&vanilla_blocks::DISPENSER), &second.world, DISPENSER_POS);
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
+            facing_down(&vanilla_blocks::DISPENSER),
+            &second.world,
+            DISPENSER_POS,
+        );
         assert_eq!(
             entities_in_front(&second.world, &vanilla_entities::CHEST_MINECART),
             1,
@@ -517,7 +534,11 @@ mod tests {
     fn dispenser_shoots_arrow_snowball_and_egg_as_projectiles() {
         for (item, entity_type, name) in [
             (&*vanilla_items::ARROW, &vanilla_entities::ARROW, "arrow"),
-            (&*vanilla_items::SNOWBALL, &vanilla_entities::SNOWBALL, "snowball"),
+            (
+                &*vanilla_items::SNOWBALL,
+                &vanilla_entities::SNOWBALL,
+                "snowball",
+            ),
             (&*vanilla_items::EGG, &vanilla_entities::EGG, "egg"),
         ] {
             let fixture = fixture(match name {
@@ -534,7 +555,11 @@ mod tests {
                 ItemStack::with_count(item, 3),
             );
 
-            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
+                state,
+                &fixture.world,
+                DISPENSER_POS,
+            );
 
             assert_eq!(
                 entities_in_front(&fixture.world, entity_type),
@@ -557,8 +582,16 @@ mod tests {
         let sapling = BlockPos::new(8, 64, 8);
         let bonemeal_dispenser = BlockPos::new(9, 64, 8);
         let tnt_dispenser = BlockPos::new(7, 64, 8);
-        world.set_block(soil, vanilla_blocks::DIRT.default_state(), UpdateFlags::UPDATE_ALL);
-        world.set_block(sapling, vanilla_blocks::OAK_SAPLING.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(
+            soil,
+            vanilla_blocks::DIRT.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+        world.set_block(
+            sapling,
+            vanilla_blocks::OAK_SAPLING.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
 
         // Bonemeal dispenser faces the sapling and grows the tree.
         let face_west = vanilla_blocks::DISPENSER
@@ -577,55 +610,102 @@ mod tests {
             0,
             ItemStack::with_count(&vanilla_items::BONE_MEAL, 8),
         );
-        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
-            face_west,
-            world,
-            bonemeal_dispenser,
-        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(face_west, world, bonemeal_dispenser);
         assert!(
-            (64..=72).any(|y| world.get_block_state(BlockPos::new(8, y, 8)).get_block()
-                == &vanilla_blocks::OAK_LOG),
+            (64..=72).any(
+                |y| world.get_block_state(BlockPos::new(8, y, 8)).get_block()
+                    == &vanilla_blocks::OAK_LOG
+            ),
             "bonemeal dispenser must grow the sapling into an oak tree"
         );
 
-        // Guarantee a full four-block trunk so the felling test is independent
-        // of the random oak feature height. The bonemeal assertion above already
-        // proves the tree was really grown by the dispenser.
         assert!(world.set_game_rule(
             &steel_registry::vanilla_game_rules::TNT_EXPLOSION_DROP_DECAY,
             false
         ));
-        assert!(!world.get_game_rule(&steel_registry::vanilla_game_rules::TNT_EXPLOSION_DROP_DECAY));
+        assert!(
+            !world.get_game_rule(&steel_registry::vanilla_game_rules::TNT_EXPLOSION_DROP_DECAY)
+        );
 
-        // A vanilla TNT blast is a random raycast, so a single blast can leave
-        // part of a 1x1 trunk untouched. A real tree farm cycles until the
-        // trunk is gone; do the same here instead of pretending one blast is
-        // deterministic.
+        // A vanilla TNT blast is a random raycast, so a single blast can miss
+        // part of the trunk. A real tree farm does not rewrite the trunk into a
+        // convenient shape: it lets the dispenser grow the actual tree, then
+        // repeats bonemeal-grow -> TNT-fell until the log drop appears.
         let face_east = vanilla_blocks::DISPENSER
             .default_state()
             .set_value(FACING, Direction::East)
             .set_value(TRIGGERED, false);
         let mut felled_log_drop = false;
-        for _attempt in 0..8 {
-            for y in 64..=67 {
+        for attempt in 0..8 {
+            if attempt > 0 {
+                // Clear the previous, partially felled tree and regrow a real
+                // oak through the bonemeal dispenser (never by writing logs).
+                for y in 64..=80 {
+                    for dx in 5..=11 {
+                        for dz in 5..=11 {
+                            let pos = BlockPos::new(dx, y, dz);
+                            let state = world.get_block_state(pos);
+                            if state.get_block() == &vanilla_blocks::OAK_LOG
+                                || state.get_block() == &vanilla_blocks::OAK_LEAVES
+                            {
+                                world.set_block(
+                                    pos,
+                                    vanilla_blocks::AIR.default_state(),
+                                    UpdateFlags::UPDATE_ALL,
+                                );
+                            }
+                        }
+                    }
+                }
                 world.set_block(
-                    BlockPos::new(8, y, 8),
-                    vanilla_blocks::OAK_LOG.default_state(),
+                    soil,
+                    vanilla_blocks::DIRT.default_state(),
                     UpdateFlags::UPDATE_ALL,
                 );
+                world.set_block(
+                    sapling,
+                    vanilla_blocks::OAK_SAPLING.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+                world.set_block(
+                    bonemeal_dispenser.above(),
+                    vanilla_blocks::REDSTONE_BLOCK.default_state(),
+                    UpdateFlags::UPDATE_NONE,
+                );
+                world.set_block(bonemeal_dispenser, face_west, UpdateFlags::UPDATE_ALL);
+                set_slot(
+                    &world,
+                    bonemeal_dispenser,
+                    0,
+                    ItemStack::with_count(&vanilla_items::BONE_MEAL, 1),
+                );
+                DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
+                    face_west,
+                    world,
+                    bonemeal_dispenser,
+                );
+                assert!(
+                    (64..=80).any(
+                        |y| world.get_block_state(BlockPos::new(8, y, 8)).get_block()
+                            == &vanilla_blocks::OAK_LOG
+                    ),
+                    "cycle {attempt}: bonemeal must grow a real oak before felling"
+                );
             }
+
             world.set_block(
                 tnt_dispenser.above(),
                 vanilla_blocks::REDSTONE_BLOCK.default_state(),
                 UpdateFlags::UPDATE_NONE,
             );
             world.set_block(tnt_dispenser, face_east, UpdateFlags::UPDATE_ALL);
-            set_slot(&world, tnt_dispenser, 0, ItemStack::new(&vanilla_items::TNT));
-            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
-                face_east,
-                world,
+            set_slot(
+                &world,
                 tnt_dispenser,
+                0,
+                ItemStack::new(&vanilla_items::TNT),
             );
+            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(face_east, world, tnt_dispenser);
             let tnts = world.get_entities_in_aabb_matching(
                 &WorldAabb::new(6.0, 63.0, 7.0, 11.0, 66.0, 9.0),
                 |entity| entity.entity_type() == &vanilla_entities::TNT,
@@ -649,7 +729,10 @@ mod tests {
                 break;
             }
         }
-        assert!(felled_log_drop, "TNT felling must spawn a real oak log item drop");
+        assert!(
+            felled_log_drop,
+            "TNT felling must spawn a real oak log item drop"
+        );
 
         let logs = world.get_entities_in_aabb_matching(
             &WorldAabb::new(5.0, 62.0, 5.0, 13.0, 74.0, 11.0),
@@ -660,8 +743,16 @@ mod tests {
         // actual explosion drop inside its vanilla suction area.
         let hopper = BlockPos::new(8, 63, 8);
         let chest = BlockPos::new(8, 62, 8);
-        world.set_block(hopper, vanilla_blocks::HOPPER.default_state(), UpdateFlags::UPDATE_ALL);
-        world.set_block(chest, vanilla_blocks::CHEST.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(
+            hopper,
+            vanilla_blocks::HOPPER.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+        world.set_block(
+            chest,
+            vanilla_blocks::CHEST.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
         for entity in &logs {
             if entity
                 .downcast_ref::<crate::entity::entities::ItemEntity>()
@@ -677,7 +768,9 @@ mod tests {
         }
         let chest_ref = container_at(world, chest);
         let guard = ContainerLockGuard::lock_all(&[&chest_ref]).expect("lock chest");
-        let inventory = guard.get(chest_ref.container_id()).expect("chest inventory");
+        let inventory = guard
+            .get(chest_ref.container_id())
+            .expect("chest inventory");
         assert!(
             (0..27).any(|slot| inventory.get_item(slot).is(&vanilla_items::OAK_LOG)),
             "hopper chain must collect felled logs into the chest"
@@ -687,7 +780,11 @@ mod tests {
         // Replant through the same bonemeal dispenser after the trunk is gone.
         // TNT can destroy the adjacent dispenser/soil in this minimal rig; a real
         // farm keeps them behind blast-resistant blocks, so rebuild the station.
-        world.set_block(soil, vanilla_blocks::DIRT.default_state(), UpdateFlags::UPDATE_ALL);
+        world.set_block(
+            soil,
+            vanilla_blocks::DIRT.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
         world.set_block(
             bonemeal_dispenser.above(),
             vanilla_blocks::REDSTONE_BLOCK.default_state(),
@@ -700,11 +797,7 @@ mod tests {
             0,
             ItemStack::new(&vanilla_items::OAK_SAPLING),
         );
-        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
-            face_west,
-            world,
-            bonemeal_dispenser,
-        );
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(face_west, world, bonemeal_dispenser);
         assert_eq!(
             world.get_block_state(sapling).get_block(),
             &vanilla_blocks::OAK_SAPLING,
@@ -824,10 +917,9 @@ mod tests {
         );
         DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
         assert_eq!(
-            fixture
-                .world
-                .get_block_state(BELOW_POS)
-                .get_value(&steel_registry::blocks::properties::BlockStateProperties::RESPAWN_ANCHOR_CHARGES),
+            fixture.world.get_block_state(BELOW_POS).get_value(
+                &steel_registry::blocks::properties::BlockStateProperties::RESPAWN_ANCHOR_CHARGES
+            ),
             1,
             "glowstone must add one charge to a respawn anchor"
         );
@@ -910,7 +1002,11 @@ mod tests {
             .expect("container")
             .get_item(0)
             .clone();
-        assert_eq!(bucket.item, &*vanilla_items::BUCKET, "dispenser must keep the empty bucket");
+        assert_eq!(
+            bucket.item,
+            &*vanilla_items::BUCKET,
+            "dispenser must keep the empty bucket"
+        );
     }
 
     #[test]
@@ -1011,7 +1107,11 @@ mod tests {
         let state = facing_down(&vanilla_blocks::DISPENSER);
         place_machine(&fixture.world, state, false);
         let triggered = state.set_value(TRIGGERED, true);
-        assert!(fixture.world.set_block(DISPENSER_POS, triggered, UpdateFlags::UPDATE_NONE));
+        assert!(
+            fixture
+                .world
+                .set_block(DISPENSER_POS, triggered, UpdateFlags::UPDATE_NONE)
+        );
         assert!(fixture.world.set_block(
             POWER_POS,
             vanilla_blocks::AIR.default_state(),
@@ -1026,7 +1126,12 @@ mod tests {
             false,
         );
 
-        assert!(!fixture.world.get_block_state(DISPENSER_POS).get_value(TRIGGERED));
+        assert!(
+            !fixture
+                .world
+                .get_block_state(DISPENSER_POS)
+                .get_value(TRIGGERED)
+        );
     }
 
     #[test]
@@ -1040,11 +1145,11 @@ mod tests {
         let hopper_state = vanilla_blocks::HOPPER
             .default_state()
             .set_value(&Props::FACING_HOPPER, Direction::Down);
-        assert!(fixture.world.set_block(
-            hopper_pos,
-            hopper_state,
-            UpdateFlags::UPDATE_NONE
-        ));
+        assert!(
+            fixture
+                .world
+                .set_block(hopper_pos, hopper_state, UpdateFlags::UPDATE_NONE)
+        );
         assert!(fixture.world.set_block(
             source_pos,
             vanilla_blocks::BARREL.default_state(),
@@ -1108,7 +1213,11 @@ mod tests {
             vanilla_blocks::REDSTONE_BLOCK.default_state(),
             UpdateFlags::UPDATE_NONE
         ));
-        assert!(fixture.world.set_block(DISPENSER_POS, east, UpdateFlags::UPDATE_NONE));
+        assert!(
+            fixture
+                .world
+                .set_block(DISPENSER_POS, east, UpdateFlags::UPDATE_NONE)
+        );
         set_slot(
             &fixture.world,
             DISPENSER_POS,

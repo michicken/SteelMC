@@ -9,7 +9,10 @@
 use std::sync::Arc;
 
 use glam::DVec3;
-use steel_registry::{REGISTRY, RegistryExt as _, vanilla_activities};
+use steel_registry::villager_profession::VillagerProfessionRef;
+use steel_registry::{
+    REGISTRY, RegistryExt as _, vanilla_activities, vanilla_villager_professions,
+};
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, DowncastType, DowncastTypeKey, Identifier};
 
@@ -35,7 +38,7 @@ unsafe impl DowncastType for JobSite {
 impl MemoryValue for JobSite {}
 
 /// Vanilla villagers keep their workstation in `JOB_SITE`.
-pub static JOB_SITE: MemoryModuleType<JobSite> =
+pub(crate) static JOB_SITE: MemoryModuleType<JobSite> =
     MemoryModuleType::new(Identifier::new_static("steel", "villager_job_site"));
 
 fn is_workstation(id: usize) -> bool {
@@ -59,6 +62,55 @@ fn is_workstation(id: usize) -> bool {
     })
 }
 
+/// Maps a workstation POI type ID to the vanilla profession it grants.
+///
+/// Vanilla `VillagerProfession` is tied to the POI type: a composter makes a
+/// farmer, a lectern a librarian, and so on.  The mapping lives here so both
+/// the POI sensor and the entity's profession assignment share one source of
+/// truth.
+#[must_use]
+pub fn profession_for_workstation_poi(id: usize) -> Option<VillagerProfessionRef> {
+    let path = REGISTRY.poi_types.by_id(id)?.key.path.as_ref();
+    Some(match path {
+        "armorer" => &vanilla_villager_professions::ARMORER,
+        "butcher" => &vanilla_villager_professions::BUTCHER,
+        "cartographer" => &vanilla_villager_professions::CARTOGRAPHER,
+        "cleric" => &vanilla_villager_professions::CLERIC,
+        "farmer" => &vanilla_villager_professions::FARMER,
+        "fisherman" => &vanilla_villager_professions::FISHERMAN,
+        "fletcher" => &vanilla_villager_professions::FLETCHER,
+        "leatherworker" => &vanilla_villager_professions::LEATHERWORKER,
+        "librarian" => &vanilla_villager_professions::LIBRARIAN,
+        "mason" => &vanilla_villager_professions::MASON,
+        "shepherd" => &vanilla_villager_professions::SHEPHERD,
+        "toolsmith" => &vanilla_villager_professions::TOOLSMITH,
+        "weaponsmith" => &vanilla_villager_professions::WEAPONSMITH,
+        _ => return None,
+    })
+}
+
+/// Finds the nearest free workstation together with its profession.
+#[must_use]
+pub fn nearest_workstation_with_profession(
+    world: &crate::world::World,
+    center: BlockPos,
+    radius: i32,
+) -> Option<(BlockPos, VillagerProfessionRef)> {
+    let storage = world.poi_storage.lock();
+    let pois =
+        storage.get_in_horizontal_square(&is_workstation, center, radius, OccupationStatus::Free);
+    pois.into_iter()
+        .filter_map(|(pos, poi_type)| {
+            profession_for_workstation_poi(poi_type).map(|profession| (pos, profession))
+        })
+        .min_by_key(|(pos, _)| {
+            let dx = i64::from(pos.x() - center.x());
+            let dy = i64::from(pos.y() - center.y());
+            let dz = i64::from(pos.z() - center.z());
+            dx * dx + dy * dy + dz * dz
+        })
+}
+
 /// Finds the nearest workstation POI around `center`.
 #[must_use]
 pub fn nearest_workstation(
@@ -66,17 +118,7 @@ pub fn nearest_workstation(
     center: BlockPos,
     radius: i32,
 ) -> Option<BlockPos> {
-    let storage = world.poi_storage.lock();
-    let pois =
-        storage.get_in_horizontal_square(&is_workstation, center, radius, OccupationStatus::Free);
-    pois.into_iter()
-        .min_by_key(|(pos, _)| {
-            let dx = i64::from(pos.x() - center.x());
-            let dy = i64::from(pos.y() - center.y());
-            let dz = i64::from(pos.z() - center.z());
-            dx * dx + dy * dy + dz * dz
-        })
-        .map(|(pos, _)| pos)
+    nearest_workstation_with_profession(world, center, radius).map(|(pos, _)| pos)
 }
 
 /// Writes the nearest free workstation into `JOB_SITE`.
@@ -145,6 +187,19 @@ impl Behavior for WorkAtJobSite {
         }
 
         let world = Arc::clone(context.level);
+        // Only farmers farm.  Other professions still walk to their claimed
+        // workstation, which is vanilla's `WorkAtPoi`; harvesting wheat for an
+        // armorer was a placeholder behavior and is not vanilla.
+        let is_farmer = world
+            .poi_storage
+            .lock()
+            .get_type(site.0)
+            .and_then(profession_for_workstation_poi)
+            .is_some_and(|profession| profession.key.path.as_ref() == "farmer");
+        if !is_farmer {
+            return;
+        }
+
         let (harvested, replanted) = harvest_mature_wheat_near(&world, site.0, 3);
         if harvested > 0 && replanted > 0 {
             log::debug!(
@@ -175,12 +230,14 @@ mod tests {
     use std::sync::Arc;
 
     use glam::DVec3;
-    use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_entities};
+    use steel_registry::{
+        RegistryExt as _, init_vanilla_registry, vanilla_blocks, vanilla_entities,
+    };
     use steel_utils::{BlockPos, ChunkPos, Downcast as _, types::UpdateFlags};
 
     use super::{JOB_SITE, nearest_workstation};
     use crate::entity::entities::VillagerEntity;
-    use crate::entity::{Entity, PathfinderMob, SharedEntity, next_entity_id};
+    use crate::entity::{LivingEntity, PathfinderMob, SharedEntity, next_entity_id};
     use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
 
     #[test]
@@ -227,6 +284,96 @@ mod tests {
             brain.memories().get(&JOB_SITE).map(|site| site.0),
             Some(composter),
             "villager brain must remember the nearest workstation"
+        );
+    }
+
+    #[test]
+    fn villager_ai_claims_workstation_and_sets_matching_profession() {
+        use steel_registry::vanilla_villager_professions;
+
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        let fixture = fresh_test_world("villager_profession_claim");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let composter = BlockPos::new(12, 64, 8);
+        world.set_block(
+            composter,
+            vanilla_blocks::COMPOSTER.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+
+        let villager: SharedEntity = Arc::new(VillagerEntity::new(
+            &vanilla_entities::VILLAGER,
+            next_entity_id(),
+            DVec3::new(8.5, 64.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&villager))
+            .expect("villager must attach");
+        let concrete = villager
+            .downcast_ref::<VillagerEntity>()
+            .expect("villager must be concrete");
+
+        assert_eq!(
+            concrete.profession_id(),
+            0,
+            "fresh villagers start unemployed"
+        );
+        for _ in 0..260 {
+            concrete.ai_step(&villager);
+        }
+
+        let farmer_id = steel_registry::REGISTRY
+            .villager_professions
+            .id_from_key(&vanilla_villager_professions::FARMER.key)
+            .and_then(|id| i32::try_from(id).ok())
+            .expect("farmer profession is registered");
+        assert_eq!(
+            concrete.profession_id(),
+            farmer_id,
+            "a composter must turn the villager into a farmer"
+        );
+        assert_eq!(concrete.villager_level(), 1);
+        assert_eq!(concrete.claimed_job_site(), Some(composter));
+        assert!(
+            world.poi_storage.lock().is_occupied(composter),
+            "the claimed workstation must hold a reserved POI ticket"
+        );
+        assert_eq!(
+            concrete.trade_offers().len(),
+            5,
+            "becoming a farmer must install the vanilla level-1 offer table"
+        );
+
+        use crate::inventory::container::Container as _;
+        use crate::test_support::TestPlayerBuilder;
+        let player = TestPlayerBuilder::new(Arc::clone(world), "TradeCustomer", 1).build();
+        player.inventory.lock().set_item(
+            0,
+            steel_registry::item_stack::ItemStack::with_count(
+                &steel_registry::vanilla_items::WHEAT,
+                20,
+            ),
+        );
+        let outcome = concrete
+            .trade_with(&player, 4)
+            .expect("farmer must sell an emerald for 20 wheat");
+        assert_eq!(outcome.xp, 2);
+        assert_eq!(
+            concrete.villager_level(),
+            2,
+            "first trade levels the villager to 2"
+        );
+        let inventory = player.inventory.lock();
+        assert!(
+            inventory
+                .items()
+                .iter()
+                .any(|stack| stack.item() == &*steel_registry::vanilla_items::EMERALD),
+            "the trade must insert a real emerald into the player inventory"
         );
     }
 }
