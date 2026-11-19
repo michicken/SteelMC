@@ -57,7 +57,13 @@ impl EndFightState {
         // Vanilla creates the dragon once the arena chunks are available. The
         // first End tick can run before the player's view has loaded chunk (0,0),
         // so keep retrying until the spawn succeeds.
-        if !self.killed && !self.spawned && self.dragon_id.is_none() {
+        if !self.killed
+            && !self.spawned
+            && self.dragon_id.is_none()
+            && world
+                .chunk_map
+                .is_block_ticking_full_chunk_loaded(steel_utils::ChunkPos::new(0, 0))
+        {
             self.spawn_dragon(world);
         }
 
