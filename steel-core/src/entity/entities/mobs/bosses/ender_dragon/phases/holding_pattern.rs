@@ -121,9 +121,8 @@ impl DragonHoldingPatternPhase {
             return false;
         };
 
-        let (cx, cy, cz) = egg.get_center();
-        let distance =
-            DVec3::new(cx, cy, cz).distance_squared(player.position()) / STRAFE_DISTANCE_SCALE;
+        let center = egg.get_center();
+        let distance = center.distance_squared(player.position()) / STRAFE_DISTANCE_SCALE;
 
         if rand::random_range(0..(distance + 2.0) as i32) == 0
             || rand::random_range(0..crystals + 2) == 0

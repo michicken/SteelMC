@@ -38,7 +38,9 @@ fn walls_test_world(key: &'static str) -> Arc<World> {
     init_vanilla_registry();
     init_behaviors();
     init_block_entities();
-    let world = fresh_test_world(key);
+    let fixture: &'static crate::test_support::TestWorld =
+        Box::leak(Box::new(fresh_test_world(key)));
+    let world = Arc::clone(&fixture.world);
     for x in -1..=1 {
         for z in -1..=1 {
             insert_ready_full_chunk(&world, ChunkPos::new(x, z));
@@ -82,7 +84,7 @@ fn health(entity: &SharedEntity) -> f32 {
 fn parts_sit_at_their_vanilla_offsets() {
     let dragon = origin_dragon();
 
-    dragon.tick_parts(test_world());
+    dragon.tick_parts(test_world(), None);
 
     // Hand-evaluated from vanilla's `aiStep` at yaw 0 with a flat flight history, so
     // both the trig table and every offset constant have to agree. The dragon is
@@ -114,7 +116,7 @@ fn a_flying_dragon_lifts_its_head() {
         .phase_manager()
         .set_phase(&dragon, EnderDragonPhase::HoldingPattern);
 
-    dragon.tick_parts(test_world());
+    dragon.tick_parts(test_world(), None);
 
     // Off the ground the head tracks the body's recent climb instead of the fixed
     // perched offset, which on a flat history is no drop at all.
@@ -182,7 +184,6 @@ fn add_target(world: &Arc<World>, position: DVec3) -> SharedEntity {
     let pig = ENTITIES
         .create(
             &vanilla_entities::PIG,
-            ENTITIES.reserve_id(&vanilla_entities::PIG).first(),
             position,
             Arc::downgrade(world),
         )
@@ -225,7 +226,7 @@ fn a_wing_sweep_shoves_and_cuts() {
     let health_before = health(&pig);
     let velocity_before = pig.velocity();
 
-    dragon.tick_parts(&world);
+    dragon.tick_parts(&world, None);
 
     // Measured as a delta so the assertion still holds if the target ever carries
     // velocity of its own into the sweep.
@@ -249,7 +250,7 @@ fn a_perched_dragon_shoves_without_cutting() {
     let pig = add_target(&world, DVec3::new(4.5, 0.0, 0.0));
     let health_before = health(&pig);
 
-    dragon.tick_parts(&world);
+    dragon.tick_parts(&world, None);
 
     assert!(pig.velocity().x > 0.0, "the pig was not shoved outwards");
     assert_eq!(health(&pig), health_before);
@@ -265,13 +266,13 @@ fn the_head_bites_for_double_a_wing() {
     let pig = add_target(&world, DVec3::new(0.0, 0.0, -7.0));
     let health_before = health(&pig);
 
-    dragon.tick_parts(&world);
+    dragon.tick_parts(&world, None);
     assert_eq!(
         health(&pig),
         health_before,
         "the head reached the pig before it had been positioned"
     );
 
-    dragon.tick_parts(&world);
+    dragon.tick_parts(&world, None);
     assert_eq!(health(&pig), health_before - 10.0);
 }

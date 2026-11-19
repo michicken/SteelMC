@@ -19,13 +19,22 @@ use crate::test_support::test_world;
 
 /// Builds a dragon on a properly reserved ID block, the way the registry does.
 fn test_dragon() -> EnderDragonEntity {
+    test_dragon_in(Weak::new())
+}
+
+/// Builds a dragon whose `level()` answers, needed by anything that records damage.
+fn test_dragon_in_world(world: &'static std::sync::Arc<crate::world::World>) -> EnderDragonEntity {
+    test_dragon_in(std::sync::Arc::downgrade(world))
+}
+
+fn test_dragon_in(world: Weak<crate::world::World>) -> EnderDragonEntity {
     init_vanilla_registry();
     let ids = reserve_entity_ids(9);
     EnderDragonEntity::new(
         &vanilla_entities::ENDER_DRAGON,
         ids.first(),
         DVec3::ZERO,
-        Weak::new(),
+        world,
     )
 }
 
@@ -142,21 +151,18 @@ fn the_registry_reserves_the_whole_block_and_builds_a_working_dragon() {
 
     // This is the path `/summon` takes. It has to reserve nine IDs, not one, or the
     // parts would alias the next entity spawned.
-    let ids = ENTITIES.reserve_id(&vanilla_entities::ENDER_DRAGON);
-    assert_eq!(ids.len(), 9);
-
     let entity = ENTITIES
         .create(
             &vanilla_entities::ENDER_DRAGON,
-            ids.first(),
             DVec3::ZERO,
             Weak::new(),
         )
         .expect("the generated factory should build a dragon");
 
     assert_eq!(entity.parts().len(), 8);
+    let first = entity.id();
     for (index, part) in entity.parts().iter().enumerate() {
-        assert_eq!(part.id(), ids.part(index as u32));
+        assert_eq!(part.id(), first + 1 + index as i32);
     }
 }
 
@@ -306,7 +312,7 @@ fn a_dying_dragon_ignores_further_damage() {
 
 #[test]
 fn only_players_and_explosions_can_hurt_the_dragon() {
-    let dragon = test_dragon();
+    let dragon = test_dragon_in_world(test_world());
     let head = dragon.sub_entities()[0].as_ref();
     let head = head
         .downcast_ref::<EnderDragonPart>()

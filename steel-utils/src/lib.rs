@@ -29,6 +29,7 @@ pub mod locks;
 pub mod logger;
 /// Vanilla `Mth` helpers.
 pub mod mth;
+pub use steel_math::wrap_degrees;
 /// Vanilla-compatible NBT helpers.
 pub mod nbt;
 pub mod random;

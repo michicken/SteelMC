@@ -392,7 +392,7 @@ impl EnderDragonEntity {
     /// A full replacement for the shared living step, as vanilla's is: the dragon
     /// steers from its phase rather than from movement input, and it shoves entities
     /// with its wings instead of the usual entity pushing.
-    fn dragon_ai_step(&self, world: &Arc<World>) -> Option<MoveResult> {
+    fn dragon_ai_step(&self, world: &Arc<World>, entity: &SharedEntity) -> Option<MoveResult> {
         self.process_flapping_movement();
 
         // Everything below is inside vanilla's `else`; a dying dragon is moved by
@@ -416,11 +416,11 @@ impl EnderDragonEntity {
         }
 
         let phase = self.tick_phase(world);
-        let result = self.steer_towards_phase_target(phase);
+        let result = self.steer_towards_phase_target(phase, entity);
 
         self.apply_effects_from_blocks();
         self.set_y_body_rot(self.yaw());
-        self.tick_parts(world);
+        self.tick_parts(world, Some(entity));
         result
     }
 
@@ -466,7 +466,7 @@ impl EnderDragonEntity {
     /// damage sweep sits *between* positioning the body and positioning the head, so
     /// it reads the head box from the previous tick; and `knock_back` centers on the
     /// body box, which by then holds this tick's position.
-    fn tick_parts(&self, world: &Arc<World>) {
+    fn tick_parts(&self, world: &Arc<World>, entity: Option<&SharedEntity>) {
         let old_positions: Vec<DVec3> = self
             .sub_entities
             .iter()
@@ -502,8 +502,8 @@ impl EnderDragonEntity {
         );
 
         if self.hurt_time() == 0 {
-            self.sweep_wings(world);
-            self.sweep_bite(world);
+            self.sweep_wings(world, entity);
+            self.sweep_bite(world, entity);
         }
 
         let head_yaw = yaw_radians - *self.y_rot_a.lock() * 0.01;
@@ -598,21 +598,21 @@ impl EnderDragonEntity {
     }
 
     /// Shoves and cuts everything under either wing. Mirrors vanilla `knockBack`.
-    fn sweep_wings(&self, world: &Arc<World>) {
+    fn sweep_wings(&self, world: &Arc<World>, entity: Option<&SharedEntity>) {
         for wing in [WING1, WING2] {
             let sweep = self
                 .part_box(wing)
                 .inflate_xyz(4.0, 2.0, 4.0)
                 .translate(DVec3::new(0.0, -2.0, 0.0));
-            self.knock_back(world, &self.entities_touching(world, sweep));
+            self.knock_back(world, &self.entities_touching(world, sweep), entity);
         }
     }
 
     /// Bites everything against the head and neck. Mirrors vanilla `hurt(level, list)`.
-    fn sweep_bite(&self, world: &Arc<World>) {
+    fn sweep_bite(&self, world: &Arc<World>, entity: Option<&SharedEntity>) {
         for part in [HEAD, NECK] {
             let sweep = self.part_box(part).inflate(1.0);
-            self.hurt_entities(world, &self.entities_touching(world, sweep));
+            self.hurt_entities(world, &self.entities_touching(world, sweep), entity);
         }
     }
 
@@ -620,7 +620,7 @@ impl EnderDragonEntity {
     ///
     /// The shove lands on every living entity, but the damage additionally needs the
     /// dragon to be airborne and the target not to have been hit moments ago.
-    fn knock_back(&self, world: &Arc<World>, entities: &[SharedEntity]) {
+    fn knock_back(&self, world: &Arc<World>, entities: &[SharedEntity], self_entity: Option<&SharedEntity>) {
         let body = self.part_box(BODY);
         let center_x = f64::midpoint(body.min_x(), body.max_x());
         let center_z = f64::midpoint(body.min_z(), body.max_z());
@@ -649,7 +649,7 @@ impl EnderDragonEntity {
             {
                 continue;
             }
-            self.attack(world, entity, WING_DAMAGE);
+            self.attack(world, entity, WING_DAMAGE, self_entity);
         }
     }
 
@@ -657,30 +657,24 @@ impl EnderDragonEntity {
     ///
     /// Renamed for the same reason as [`Self::hurt_part`]: Rust has no overloading and
     /// the vanilla name collides with `Entity::hurt`.
-    fn hurt_entities(&self, world: &Arc<World>, entities: &[SharedEntity]) {
+    fn hurt_entities(&self, world: &Arc<World>, entities: &[SharedEntity], self_entity: Option<&SharedEntity>) {
         for entity in entities {
             if entity.as_living_entity().is_some() {
-                self.attack(world, entity, BITE_DAMAGE);
+                self.attack(world, entity, BITE_DAMAGE, self_entity);
             }
         }
     }
 
     /// Applies one contact hit, including the post-attack enchantment effects.
-    fn attack(&self, world: &Arc<World>, target: &SharedEntity, damage: f32) {
-        let source = self.mob_attack_damage_source();
+    fn attack(&self, world: &Arc<World>, target: &SharedEntity, damage: f32, self_entity: Option<&SharedEntity>) {
+        let source = self.mob_attack_damage_source(self_entity);
         target.hurt(world, &source, damage);
 
-        let attacker = self.as_entity_event_source();
-        let context = EnchantmentPostAttackContext::new(
-            target.as_ref(),
-            Some(attacker),
-            Some(attacker),
-            &source,
-        );
+        let context = EnchantmentPostAttackContext::new(target, &source);
         enchantment_helper::do_post_attack_effects_with_item_source(
             world,
             target.as_ref(),
-            &ItemStack::empty(),
+            ItemStack::empty(),
             &context,
         );
     }
@@ -689,11 +683,15 @@ impl EnderDragonEntity {
     ///
     /// Deliberately not `Mob::mob_attack_damage_source`, which derives the damage type
     /// from a held weapon; vanilla's dragon always attacks as a bare mob.
-    fn mob_attack_damage_source(&self) -> DamageSource {
-        DamageSource::environment(&vanilla_damage_types::MOB_ATTACK)
-            .with_causing_entity(self.id())
-            .with_direct_entity(self.id())
-            .with_source_position(self.position())
+    fn mob_attack_damage_source(&self, attacker: Option<&SharedEntity>) -> DamageSource {
+        let source = DamageSource::environment(&vanilla_damage_types::MOB_ATTACK)
+            .with_source_position(self.position());
+        match attacker {
+            Some(attacker) => source
+                .with_causing_entity(Arc::clone(attacker))
+                .with_direct_entity(Arc::clone(attacker)),
+            None => source,
+        }
     }
 
     /// Carves through, or bumps into, everything inside one hitbox.
@@ -807,7 +805,7 @@ impl EnderDragonEntity {
     /// taken from the pre-clamp height delta; the heading vector reads the vertical
     /// velocity *after* the climb has been added; and the forward thrust is applied
     /// along `-Z` rather than through a movement input.
-    fn steer_towards_phase_target(&self, phase: EnderDragonPhase) -> Option<MoveResult> {
+    fn steer_towards_phase_target(&self, phase: EnderDragonPhase, entity: &SharedEntity) -> Option<MoveResult> {
         let instance = self.phase_manager.instance(phase);
         let target = instance.fly_target_location()?;
 
@@ -862,7 +860,7 @@ impl EnderDragonEntity {
         } else {
             velocity
         };
-        let result = self.move_entity(MoverType::SelfMovement, movement);
+        let result = Arc::clone(entity).move_entity(MoverType::SelfMovement, movement);
 
         let moved = self.velocity();
         let slide = 0.8 + 0.15 * (moved.normalize_or_zero().dot(heading) + 1.0) / 2.0;
@@ -923,8 +921,7 @@ impl EnderDragonEntity {
         }
 
         source
-            .causing_entity_id
-            .and_then(|id| world.get_entity_by_id(id))
+            .causing_entity()
             .is_some_and(|entity| entity.as_player().is_some())
     }
 
@@ -1071,9 +1068,9 @@ impl LivingEntity for EnderDragonEntity {
     }
 
     /// Mirrors vanilla `EnderDragon.aiStep`, which does not call `super`.
-    fn ai_step(&self) -> Option<MoveResult> {
+    fn ai_step(&self, entity: &SharedEntity) -> Option<MoveResult> {
         let world = self.level()?;
-        self.dragon_ai_step(&world)
+        self.dragon_ai_step(&world, entity)
     }
 
     /// Flushes the line-of-sight cache the shared AI path would have cleared.
@@ -1081,7 +1078,7 @@ impl LivingEntity for EnderDragonEntity {
     /// The dragon replaces `ai_step` wholesale, so it never reaches
     /// `mob_server_ai_step`, and without this every targeting check would answer from
     /// a cache populated once and never invalidated.
-    fn server_ai_step(&self) {
+    fn server_ai_step(&self, _entity: &SharedEntity) {
         self.tick_sensing();
     }
 

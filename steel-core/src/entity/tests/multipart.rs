@@ -335,7 +335,7 @@ fn reading_past_the_reserved_block_is_rejected() {
 fn a_part_keeps_its_own_hitbox_across_a_dimension_refresh() {
     init_vanilla_registry();
     let world = fresh_test_world("multipart_part_hitbox");
-    let entity = spawn_multipart(&world);
+    let (_fixture, entity) = spawn_multipart("multipart_part_hitbox");
     let part = &entity.parts()[0];
 
     // A part reports its parent's entity type, so without the `dimensions_for_pose`
