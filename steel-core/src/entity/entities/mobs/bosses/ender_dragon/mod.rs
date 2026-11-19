@@ -1230,7 +1230,6 @@ impl LivingEntity for EnderDragonEntity {
     /// a different limit. Vanilla's explosion particles between ticks 180 and 200 go
     /// through `Level.addParticle`, a no-op on the server, so they are absent here.
     fn tick_death(&self) {
-        // TODO: Report to `EnderDragonFight::update_dragon` once the fight exists.
         let death_time = {
             let mut death_time = self.dragon_death_time.lock();
             *death_time += 1;
