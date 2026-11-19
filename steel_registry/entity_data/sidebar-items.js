@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ArmadilloState","Direction","EntityData","EntityPose","HumanoidArm","SnifferState"],"fn":["random_villager_profession_id","write_data_values"],"mod":["serializer","vanilla_serializers"],"struct":["BlockPos","DataValue","GlobalPos","ParticleList","Quaternionf","Rotations","SyncedValue","Vector3f","VillagerData"]};
