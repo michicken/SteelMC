@@ -11,13 +11,15 @@ use rand::Rng;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
-use steel_protocol::packets::game::SoundSource;
+use steel_protocol::packets::game::{CBossEvent, SoundSource};
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::WitherBossEntityData;
 use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::item_stack::ItemStack;
+use steel_utils::translations;
+use text_components::TextComponent;
 use steel_utils::locks::SyncMutex;
 use steel_utils::types::UpdateFlags;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
@@ -58,6 +60,8 @@ pub struct WitherBossEntity {
     age: SyncMutex<i32>,
     attack_cooldown: SyncMutex<i32>,
     target: SyncMutex<Option<SharedEntity>>,
+    boss_bar_sent: SyncMutex<bool>,
+    boss_bar_progress: SyncMutex<f32>,
 }
 
 // SAFETY: The owner-scoped type key uniquely identifies WitherBossEntity.
@@ -123,6 +127,34 @@ impl WitherBossEntity {
             age: SyncMutex::new(0),
             attack_cooldown: SyncMutex::new(SKULL_INTERVAL),
             target: SyncMutex::new(None),
+            boss_bar_sent: SyncMutex::new(false),
+            boss_bar_progress: SyncMutex::new(1.0),
+        }
+    }
+
+    fn update_boss_bar(&self, world: &Arc<World>) {
+        let progress = (self.get_health() / self.get_max_health().max(0.001)).clamp(0.0, 1.0);
+        if !*self.boss_bar_sent.lock() {
+            if world.players.len() == 0 {
+                return;
+            }
+            *self.boss_bar_sent.lock() = true;
+            *self.boss_bar_progress.lock() = progress;
+            world.broadcast_to_all(CBossEvent::add(
+                self.uuid(),
+                TextComponent::translated(translations::ENTITY_MINECRAFT_WITHER.msg()),
+                progress,
+                5,
+            ));
+            return;
+        }
+        if *self.age.lock() % 20 != 0 {
+            return;
+        }
+        let mut last = self.boss_bar_progress.lock();
+        if (progress - *last).abs() > 0.01 {
+            *last = progress;
+            world.broadcast_to_all(CBossEvent::update_progress(self.uuid(), progress));
         }
     }
 
@@ -243,6 +275,7 @@ impl Entity for WitherBossEntity {
         if let Some(world) = self.level() {
             *self.age.lock() += 1;
             self.fly_and_attack(&world);
+            self.update_boss_bar(&world);
         }
     }
 
@@ -331,6 +364,10 @@ impl LivingEntity for WitherBossEntity {
         let Some(world) = self.level() else {
             return;
         };
+        if *self.boss_bar_sent.lock() {
+            world.broadcast_to_all(CBossEvent::remove(self.uuid()));
+            *self.boss_bar_sent.lock() = false;
+        }
         let drop_pos = self.position() + DVec3::new(0.0, 0.5, 0.0);
         world.spawn_item(drop_pos, ItemStack::new(&vanilla_items::NETHER_STAR));
 

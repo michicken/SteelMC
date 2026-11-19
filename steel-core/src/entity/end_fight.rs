@@ -18,7 +18,11 @@ use steel_utils::{BlockPos, locks::SyncMutex};
 use crate::chunk::heightmap::HeightmapType;
 use crate::entity::entities::EnderDragonEntity;
 use crate::entity::entities::mobs::bosses::ender_dragon::end_podium_location;
-use crate::entity::{Entity, SharedEntity, reserve_entity_ids};
+use crate::entity::{Entity, LivingEntity, SharedEntity, reserve_entity_ids};
+use steel_protocol::packets::game::CBossEvent;
+use steel_utils::translations;
+use text_components::TextComponent;
+use uuid::Uuid;
 use crate::world::World;
 
 /// Persistent-enough state for one End level.
@@ -27,6 +31,8 @@ pub struct EndFightState {
     initialized: bool,
     killed: bool,
     dragon_id: Option<i32>,
+    dragon_uuid: Option<Uuid>,
+    last_boss_progress: f32,
 }
 
 impl EndFightState {
@@ -54,10 +60,25 @@ impl EndFightState {
         // A dragon removed for any reason other than the fight's own kill (for
         // example a `/kill`) leaves the arena empty, exactly as vanilla waits for
         // the fight to be reset rather than silently spawning a replacement.
-        if let Some(id) = self.dragon_id
-            && world.get_entity_by_id(id).is_none()
-        {
-            self.dragon_id = None;
+        if let Some(id) = self.dragon_id {
+            match world.get_entity_by_id(id) {
+                Some(entity) => {
+                    let progress = entity
+                        .as_living_entity()
+                        .map_or(0.0, |living| {
+                            (living.get_health() / living.get_max_health().max(0.001)).clamp(0.0, 1.0)
+                        });
+                    if (progress - self.last_boss_progress).abs() > 0.01 {
+                        self.last_boss_progress = progress;
+                        if let Some(uuid) = self.dragon_uuid {
+                            world.broadcast_to_all(CBossEvent::update_progress(uuid, progress));
+                        }
+                    }
+                }
+                None => {
+                    self.dragon_id = None;
+                }
+            }
         }
     }
 
@@ -68,6 +89,9 @@ impl EndFightState {
         }
         self.killed = true;
         self.dragon_id = None;
+        if let Some(uuid) = self.dragon_uuid.take() {
+            world.broadcast_to_all(CBossEvent::remove(uuid));
+        }
         self.build_exit_portal(world);
     }
 
@@ -82,7 +106,18 @@ impl EndFightState {
         dragon.set_fight_origin(BlockPos::ZERO);
         let entity: SharedEntity = Arc::new(dragon);
         if world.try_add_entity(entity).is_ok() {
-            self.dragon_id = Some(ids.first());
+            let id = ids.first();
+            self.dragon_id = Some(id);
+            self.dragon_uuid = world.get_entity_by_id(id).map(|entity| entity.uuid());
+            self.last_boss_progress = 1.0;
+            if let Some(uuid) = self.dragon_uuid {
+                world.broadcast_to_all(CBossEvent::add(
+                    uuid,
+                    TextComponent::translated(translations::ENTITY_MINECRAFT_ENDER_DRAGON.msg()),
+                    1.0,
+                    0,
+                ));
+            }
         }
     }
 

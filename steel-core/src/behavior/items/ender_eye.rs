@@ -305,9 +305,11 @@ mod tests {
     use steel_registry::{init_vanilla_registry, vanilla_blocks};
     use steel_utils::{BlockPos, BlockStateId};
 
-    use crate::test_support::TestLevel;
+    use steel_utils::types::UpdateFlags;
 
-    use super::find_completed_end_portal_origin;
+    use crate::test_support::{TestLevel, fresh_test_world, insert_ready_full_chunk};
+
+    use super::{find_completed_end_portal_origin, spawn_end_portal};
 
     fn eye_frame(facing: Direction) -> BlockStateId {
         vanilla_blocks::END_PORTAL_FRAME
@@ -349,6 +351,33 @@ mod tests {
             find_completed_end_portal_origin(&level, origin.offset(3, 0, 0)),
             Some(origin)
         );
+    }
+
+    #[test]
+    fn completed_frame_ring_places_the_nine_block_end_portal() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+        let fixture = fresh_test_world("end_portal_spawn");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, steel_utils::ChunkPos::new(0, 0));
+        let origin = BlockPos::new(4, 64, 9);
+        for offset in 0..3 {
+            world.set_block(origin.offset(offset, 0, -1), eye_frame(Direction::South), UpdateFlags::UPDATE_ALL);
+            world.set_block(origin.offset(offset, 0, 3), eye_frame(Direction::North), UpdateFlags::UPDATE_ALL);
+            world.set_block(origin.offset(-1, 0, offset), eye_frame(Direction::East), UpdateFlags::UPDATE_ALL);
+            world.set_block(origin.offset(3, 0, offset), eye_frame(Direction::West), UpdateFlags::UPDATE_ALL);
+        }
+        spawn_end_portal(world, origin);
+        for dx in 0..3 {
+            for dz in 0..3 {
+                assert_eq!(
+                    world.get_block_state(origin.offset(dx, 0, dz)).get_block(),
+                    &vanilla_blocks::END_PORTAL,
+                    "every interior block must become an end portal block"
+                );
+            }
+        }
     }
 
     #[test]
