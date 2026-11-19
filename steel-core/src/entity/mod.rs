@@ -831,6 +831,7 @@ mod conversion;
 pub mod damage;
 pub(crate) mod dismount_helper;
 pub mod entities;
+pub mod end_fight;
 pub mod natural_spawn;
 #[expect(
     clippy::module_inception,

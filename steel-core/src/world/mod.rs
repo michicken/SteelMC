@@ -329,9 +329,22 @@ pub struct World {
     /// Live multipart sub-entities by session ID (vanilla `ServerLevel.dragonParts`), kept
     /// out of the entity manager.
     entity_parts: SyncMutex<FxHashMap<i32, Arc<dyn PartEntity>>>,
+    /// The End dragon fight state for this level (unused outside the End).
+    end_fight: crate::entity::end_fight::EndFight,
 }
 
 impl World {
+    /// Called by `EnderDragonEntity::tick_death` when its death animation finishes.
+    pub fn on_ender_dragon_killed(self: &Arc<Self>) {
+        self.end_fight.lock().on_dragon_killed(self);
+    }
+
+    /// Returns whether the End dragon fight has been completed in this world.
+    #[must_use]
+    pub fn is_ender_dragon_killed(&self) -> bool {
+        self.end_fight.lock().is_killed()
+    }
+
     /// Creates a new world with custom configuration.
     ///
     /// This allows specifying storage backend (disk or RAM-only) and other options.
@@ -485,6 +498,7 @@ impl World {
                 poi_storage: SyncMutex::new(PointOfInterestStorage::new()),
                 pending_world_changes: SyncMutex::new(Vec::new()),
                 entity_parts: SyncMutex::new(FxHashMap::default()),
+                end_fight: SyncMutex::new(crate::entity::end_fight::EndFightState::default()),
             }
         }))
     }
@@ -618,6 +632,10 @@ impl World {
             && tick_count % 20 == 0
         {
             crate::entity::natural_spawn::tick_natural_spawns(self, 3);
+        }
+
+        if runs_normally && self.dimension_type == &steel_registry::vanilla_dimension_types::THE_END {
+            self.end_fight.lock().tick(self);
         }
 
         let entity_tick = {

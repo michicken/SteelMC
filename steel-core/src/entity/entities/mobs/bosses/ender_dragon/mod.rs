@@ -1264,7 +1264,7 @@ impl LivingEntity for EnderDragonEntity {
 
         self.award_death_experience(&world, DEATH_XP_FINAL_SHARE);
 
-        // TODO: Report to `EnderDragonFight::set_dragon_killed` once the fight exists.
+        world.on_ender_dragon_killed();
         self.set_removed(RemovalReason::Killed);
         self.game_event(&vanilla_game_events::ENTITY_DIE);
     }

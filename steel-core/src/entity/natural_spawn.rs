@@ -11,8 +11,13 @@ use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::{vanilla_blocks, vanilla_entities};
 use steel_utils::BlockPos;
 
+use steel_registry::vanilla_dimension_types;
+
 use crate::chunk::light::LightLayer;
-use crate::entity::entities::{SkeletonEntity, SpiderEntity, ZombieEntity};
+use crate::entity::entities::{
+    BlazeEntity, ChickenEntity, CowEntity, EndermanEntity, PigEntity, SheepEntity,
+    SkeletonEntity, SpiderEntity, WitherSkeletonEntity, ZombieEntity,
+};
 use crate::entity::{Entity, SharedEntity, next_entity_id};
 use crate::world::World;
 
@@ -20,6 +25,10 @@ use crate::world::World;
 const HOSTILE_CAP_RADIUS: f64 = 48.0;
 /// Maximum natural hostiles per player before spawning pauses.
 const HOSTILE_CAP: usize = 24;
+/// Maximum natural passive animals per player.
+const PASSIVE_CAP: usize = 10;
+/// Nether brick search radius for fortress-only spawns.
+const FORTRESS_SEARCH_RADIUS: i32 = 16;
 
 /// Tries to spawn naturally near every player. Returns the number spawned.
 pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> usize {
@@ -40,11 +49,7 @@ pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> us
                     player_pos.y + HOSTILE_CAP_RADIUS,
                     player_pos.z + HOSTILE_CAP_RADIUS,
                 ),
-                |entity| {
-                    entity.entity_type() == &vanilla_entities::ZOMBIE
-                        || entity.entity_type() == &vanilla_entities::SKELETON
-                        || entity.entity_type() == &vanilla_entities::SPIDER
-                },
+                |entity| is_hostile(entity.entity_type()),
             )
             .len();
         if hostiles >= HOSTILE_CAP {
@@ -60,32 +65,111 @@ pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> us
                 continue;
             }
 
-            let entity: SharedEntity = match rand::random::<u8>() % 3 {
-                0 => Arc::new(ZombieEntity::new(
-                    &vanilla_entities::ZOMBIE,
-                    next_entity_id(),
-                    pos.get_center(),
-                    Arc::downgrade(world),
-                )),
-                1 => Arc::new(SkeletonEntity::new(
-                    &vanilla_entities::SKELETON,
-                    next_entity_id(),
-                    pos.get_center(),
-                    Arc::downgrade(world),
-                )),
-                _ => Arc::new(SpiderEntity::new(
-                    &vanilla_entities::SPIDER,
-                    next_entity_id(),
-                    pos.get_center(),
-                    Arc::downgrade(world),
-                )),
-            };
+            let entity: SharedEntity = spawn_hostile_for_dimension(world, pos);
             if world.try_add_entity(entity).is_ok() {
                 spawned += 1;
             }
         }
     }
     spawned
+}
+
+fn is_hostile(entity_type: steel_registry::entity_type::EntityTypeRef) -> bool {
+    entity_type == &vanilla_entities::ZOMBIE
+        || entity_type == &vanilla_entities::SKELETON
+        || entity_type == &vanilla_entities::SPIDER
+        || entity_type == &vanilla_entities::ENDERMAN
+        || entity_type == &vanilla_entities::BLAZE
+        || entity_type == &vanilla_entities::WITHER_SKELETON
+}
+
+fn spawn_hostile_for_dimension(world: &Arc<World>, pos: BlockPos) -> SharedEntity {
+    if world.dimension_type == &vanilla_dimension_types::THE_END {
+        return Arc::new(EndermanEntity::new(
+            &vanilla_entities::ENDERMAN,
+            next_entity_id(),
+            pos.get_center(),
+            Arc::downgrade(world),
+        ));
+    }
+    if world.dimension_type == &vanilla_dimension_types::THE_NETHER {
+        if near_nether_bricks(world, pos) {
+            return if rand::random::<bool>() {
+                Arc::new(BlazeEntity::new(
+                    &vanilla_entities::BLAZE,
+                    next_entity_id(),
+                    pos.get_center(),
+                    Arc::downgrade(world),
+                ))
+            } else {
+                Arc::new(WitherSkeletonEntity::new(
+                    &vanilla_entities::WITHER_SKELETON,
+                    next_entity_id(),
+                    pos.get_center(),
+                    Arc::downgrade(world),
+                ))
+            };
+        }
+        return if rand::random::<bool>() {
+            Arc::new(ZombieEntity::new(
+                &vanilla_entities::ZOMBIE,
+                next_entity_id(),
+                pos.get_center(),
+                Arc::downgrade(world),
+            ))
+        } else {
+            Arc::new(WitherSkeletonEntity::new(
+                &vanilla_entities::WITHER_SKELETON,
+                next_entity_id(),
+                pos.get_center(),
+                Arc::downgrade(world),
+            ))
+        };
+    }
+
+    match rand::random::<u8>() % 10 {
+        0 => Arc::new(EndermanEntity::new(
+            &vanilla_entities::ENDERMAN,
+            next_entity_id(),
+            pos.get_center(),
+            Arc::downgrade(world),
+        )),
+        1..=4 => Arc::new(ZombieEntity::new(
+            &vanilla_entities::ZOMBIE,
+            next_entity_id(),
+            pos.get_center(),
+            Arc::downgrade(world),
+        )),
+        5..=7 => Arc::new(SkeletonEntity::new(
+            &vanilla_entities::SKELETON,
+            next_entity_id(),
+            pos.get_center(),
+            Arc::downgrade(world),
+        )),
+        _ => Arc::new(SpiderEntity::new(
+            &vanilla_entities::SPIDER,
+            next_entity_id(),
+            pos.get_center(),
+            Arc::downgrade(world),
+        )),
+    }
+}
+
+fn near_nether_bricks(world: &Arc<World>, pos: BlockPos) -> bool {
+    for dx in -FORTRESS_SEARCH_RADIUS..=FORTRESS_SEARCH_RADIUS {
+        for dy in -8..=8 {
+            for dz in -FORTRESS_SEARCH_RADIUS..=FORTRESS_SEARCH_RADIUS {
+                if world
+                    .get_block_state(BlockPos::new(pos.x() + dx, pos.y() + dy, pos.z() + dz))
+                    .get_block()
+                    == &vanilla_blocks::NETHER_BRICKS
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn is_dark_spawnable(world: &Arc<World>, pos: BlockPos) -> bool {
@@ -185,11 +269,7 @@ mod tests {
         let hostiles = world
             .get_entities_in_aabb_matching(
                 &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 72.0, 16.0),
-                |entity| {
-                    entity.entity_type() == &vanilla_entities::ZOMBIE
-                        || entity.entity_type() == &vanilla_entities::SKELETON
-                        || entity.entity_type() == &vanilla_entities::SPIDER
-                },
+                |entity| super::is_hostile(entity.entity_type()),
             )
             .len();
         assert!(

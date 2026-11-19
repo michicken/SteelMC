@@ -47,6 +47,7 @@ fn dragon_at(world: &Arc<World>, position: DVec3) -> EnderDragonEntity {
 /// flight graph's radius-60 outer ring.
 fn chunked_test_world(key: &'static str, chunk_radius: i32) -> Arc<World> {
     init_vanilla_registry();
+    crate::behavior::init_behaviors();
     let fixture: &'static crate::test_support::TestWorld =
         Box::leak(Box::new(fresh_test_world(key)));
     let world = Arc::clone(&fixture.world);

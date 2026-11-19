@@ -10,7 +10,8 @@ use steel_protocol::packets::game::SoundSource;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::BlazeEntityData;
-use steel_registry::{sound_events, vanilla_attributes};
+use steel_registry::item_stack::ItemStack;
+use steel_registry::{sound_events, vanilla_attributes, vanilla_items};
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, DowncastType, DowncastTypeKey};
 
@@ -319,6 +320,16 @@ impl LivingEntity for BlazeEntity {
 
     fn should_drop_loot(&self, world: &World) -> bool {
         Monster::should_drop_loot_monster(self, world)
+    }
+
+    /// Vanilla's blaze loot table: one blaze rod (0-1 with looting, simplified
+    /// to one so potion brewing is always reachable in survival).
+    fn drop_custom_death_loot(&self, _source: &DamageSource, _killed_by_player: bool) {
+        let Some(world) = self.level() else {
+            return;
+        };
+        let drop_pos = self.position() + DVec3::new(0.0, 0.5, 0.0);
+        world.spawn_item(drop_pos, ItemStack::new(&vanilla_items::BLAZE_ROD));
     }
 
     fn server_ai_step(&self, entity: &SharedEntity) {

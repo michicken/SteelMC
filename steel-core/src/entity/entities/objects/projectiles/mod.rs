@@ -12,6 +12,7 @@ mod snowball;
 mod splash_potion;
 mod thrown_egg;
 mod wind_charge;
+mod wither_skull;
 
 pub use arrow::ArrowEntity;
 pub use ender_pearl::EnderPearlEntity;
@@ -25,3 +26,4 @@ pub use snowball::SnowballEntity;
 pub use splash_potion::SplashPotionEntity;
 pub use thrown_egg::ThrownEggEntity;
 pub use wind_charge::WindChargeEntity;
+pub use wither_skull::WitherSkullEntity;
