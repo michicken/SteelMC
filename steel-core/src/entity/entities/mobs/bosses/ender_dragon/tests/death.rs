@@ -12,8 +12,8 @@ const DEATH_DURATION: i32 = 200;
 /// The point the death phase steers at: the podium's surface, centered in its block.
 fn podium_target(world: &Arc<World>) -> DVec3 {
     let podium = world.heightmap_pos(HeightmapType::MotionBlocking, BlockPos::ZERO);
-    let (x, y, z) = podium.get_bottom_center();
-    DVec3::new(x, y, z)
+    let center = podium.get_bottom_center();
+    center
 }
 
 /// A dragon already in its death phase.

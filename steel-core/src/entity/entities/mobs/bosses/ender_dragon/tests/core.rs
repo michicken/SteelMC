@@ -373,7 +373,7 @@ fn a_dying_dragon_keeps_its_wing_beat_in_lockstep() {
 
     // Beat the wings a while so the two times sit apart.
     for _ in 0..20 {
-        dragon.dragon_ai_step(&world);
+        dragon.dragon_ai_step(&world, None);
     }
     assert_ne!(
         *dragon.flap_time.lock(),
@@ -387,7 +387,7 @@ fn a_dying_dragon_keeps_its_wing_beat_in_lockstep() {
     // Frozen a stroke apart, `is_flapping` would answer the same constant every dying
     // tick, which is a FLAP event on all 200 of them if that pair straddles -0.3.
     for _ in 0..DRAGON_DEATH_DURATION {
-        dragon.dragon_ai_step(&world);
+        dragon.dragon_ai_step(&world, None);
         assert_eq!(*dragon.flap_time.lock(), *dragon.o_flap_time.lock());
         assert!(!dragon.is_flapping(), "a dying dragon never re-flaps");
     }

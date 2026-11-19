@@ -436,7 +436,7 @@ impl EnderDragonEntity {
     /// A full replacement for the shared living step, as vanilla's is: the dragon
     /// steers from its phase rather than from movement input, and it shoves entities
     /// with its wings instead of the usual entity pushing.
-    fn dragon_ai_step(&self, world: &Arc<World>, entity: &SharedEntity) -> Option<MoveResult> {
+    fn dragon_ai_step(&self, world: &Arc<World>, entity: Option<&SharedEntity>) -> Option<MoveResult> {
         self.process_flapping_movement();
 
         // Above the `isDeadOrDying` split, as vanilla does, so the beat keeps tracking
@@ -465,11 +465,11 @@ impl EnderDragonEntity {
         }
 
         let phase = self.tick_phase(world);
-        let result = self.steer_towards_phase_target(phase, entity);
+        let result = self.steer_towards_phase_target(phase);
 
         self.apply_effects_from_blocks();
         self.set_y_body_rot(self.yaw());
-        self.tick_parts(world, Some(entity));
+        self.tick_parts(world, entity);
         result
     }
 
@@ -919,7 +919,7 @@ impl EnderDragonEntity {
     /// taken from the pre-clamp height delta; the heading vector reads the vertical
     /// velocity *after* the climb has been added; and the forward thrust is applied
     /// along `-Z` rather than through a movement input.
-    fn steer_towards_phase_target(&self, phase: EnderDragonPhase, entity: &SharedEntity) -> Option<MoveResult> {
+    fn steer_towards_phase_target(&self, phase: EnderDragonPhase) -> Option<MoveResult> {
         let instance = self.phase_manager.instance(phase);
         let target = instance.fly_target_location()?;
 
@@ -974,7 +974,7 @@ impl EnderDragonEntity {
         } else {
             velocity
         };
-        let result = Arc::clone(entity).move_entity(MoverType::SelfMovement, movement);
+        let result = self.move_without_physics(movement);
 
         let moved = self.velocity();
         let slide = 0.8 + 0.15 * (moved.normalize_or_zero().dot(heading) + 1.0) / 2.0;
@@ -1250,7 +1250,7 @@ impl LivingEntity for EnderDragonEntity {
         }
 
         let drift = DVec3::new(0.0, f64::from(DEATH_DRIFT_PER_TICK), 0.0);
-        let _ = self.move_entity(MoverType::SelfMovement, drift);
+        let _ = self.move_without_physics(drift);
         for part in &self.sub_entities {
             // The old position is recorded *before* the move here, the opposite way
             // round from `tick_parts`, which snapshots first and writes back after.
@@ -1272,7 +1272,7 @@ impl LivingEntity for EnderDragonEntity {
     /// Mirrors vanilla `EnderDragon.aiStep`, which does not call `super`.
     fn ai_step(&self, entity: &SharedEntity) -> Option<MoveResult> {
         let world = self.level()?;
-        self.dragon_ai_step(&world, entity)
+        self.dragon_ai_step(&world, Some(entity))
     }
 
     /// Flushes the line-of-sight cache the shared AI path would have cleared.

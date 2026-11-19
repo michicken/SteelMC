@@ -45,7 +45,8 @@ impl DragonDeathPhase {
         // level with `MotionBlockingNoLeaves`. Vanilla really does differ here.
         let podium = end_podium_location(dragon.fight_origin());
         let y = world.height_at(HeightmapType::MotionBlocking, podium.x(), podium.z())?;
-        let (x, y, z) = BlockPos::new(podium.x(), y, podium.z()).get_bottom_center();
+        let center = BlockPos::new(podium.x(), y, podium.z()).get_bottom_center();
+        let (x, y, z) = (center.x, center.y, center.z);
         Some(DVec3::new(x, y, z))
     }
 }
