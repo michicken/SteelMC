@@ -30,6 +30,7 @@ use crate::world::World;
 pub struct EndFightState {
     initialized: bool,
     killed: bool,
+    spawned: bool,
     dragon_id: Option<i32>,
     dragon_uuid: Option<Uuid>,
     last_boss_progress: f32,
@@ -52,9 +53,12 @@ impl EndFightState {
     pub fn tick(&mut self, world: &Arc<World>) {
         if !self.initialized {
             self.initialized = true;
-            if !self.killed {
-                self.spawn_dragon(world);
-            }
+        }
+        // Vanilla creates the dragon once the arena chunks are available. The
+        // first End tick can run before the player's view has loaded chunk (0,0),
+        // so keep retrying until the spawn succeeds.
+        if !self.killed && !self.spawned && self.dragon_id.is_none() {
+            self.spawn_dragon(world);
         }
 
         // A dragon removed for any reason other than the fight's own kill (for
@@ -107,6 +111,7 @@ impl EndFightState {
         let entity: SharedEntity = Arc::new(dragon);
         if world.try_add_entity(entity).is_ok() {
             let id = ids.first();
+            self.spawned = true;
             self.dragon_id = Some(id);
             self.dragon_uuid = world.get_entity_by_id(id).map(|entity| entity.uuid());
             self.last_boss_progress = 1.0;
@@ -168,9 +173,13 @@ mod tests {
     use std::sync::Arc;
 
     use steel_registry::blocks::block_state_ext::BlockStateExt as _;
-    use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_dimension_types};
+    use steel_registry::{
+        init_vanilla_registry, vanilla_blocks, vanilla_damage_types, vanilla_dimension_types,
+    };
     use steel_utils::{BlockPos, Downcast as _};
 
+    use crate::entity::damage::DamageSource;
+    use crate::entity::entities::mobs::bosses::ender_dragon::EnderDragonPhase;
     use crate::entity::{Entity, LivingEntity};
 
     use super::EndFightState;
@@ -180,14 +189,19 @@ mod tests {
         init_vanilla_registry();
         crate::behavior::init_behaviors();
         crate::block_entity::init_block_entities();
-        let fixture =
-            fresh_test_world_with_dimension_type("end_fight_test", key, &vanilla_dimension_types::THE_END);
+        // Leaked so the fixture's damage history outlives the world handle: a
+        // real killing blow records into it.
+        let fixture = Box::leak(Box::new(fresh_test_world_with_dimension_type(
+            "end_fight_test",
+            key,
+            &vanilla_dimension_types::THE_END,
+        )));
         for cx in -1..=1 {
             for cz in -1..=1 {
                 insert_ready_full_chunk(&fixture.world, steel_utils::ChunkPos::new(cx, cz));
             }
         }
-        fixture.world
+        Arc::clone(&fixture.world)
     }
 
     #[test]
@@ -207,6 +221,34 @@ mod tests {
         // A second tick must not create a duplicate.
         fight.tick(&world);
         assert_eq!(fight.dragon_id(), Some(id));
+    }
+
+    #[test]
+    fn dragon_spawn_waits_for_the_arena_chunks_to_load() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+        let fixture = fresh_test_world_with_dimension_type(
+            "end_fight_test",
+            "retry",
+            &vanilla_dimension_types::THE_END,
+        );
+        let world = fixture.world;
+        let mut fight = EndFightState::default();
+        // No arena chunk is loaded yet: the dragon cannot be inserted.
+        fight.tick(&world);
+        assert!(fight.dragon_id().is_none(), "no dragon without chunk (0,0)");
+
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                insert_ready_full_chunk(&world, steel_utils::ChunkPos::new(cx, cz));
+            }
+        }
+        fight.tick(&world);
+        assert!(
+            fight.dragon_id().is_some(),
+            "dragon must appear once the arena chunks are available"
+        );
     }
 
     #[test]
@@ -258,9 +300,23 @@ mod tests {
             .downcast_ref::<crate::entity::entities::EnderDragonEntity>()
             .expect("dragon");
 
-        // Drop the health to zero the way combat would and run the 200-tick
-        // death animation; the final tick must notify the fight.
-        dragon.set_health(0.0);
+        // A freshly built dragon starts in the hovering (sitting) phase; the fight
+        // tick moves it to holding-pattern flight. Test the airborne branch.
+        dragon
+            .phase_manager()
+            .set_phase(dragon, EnderDragonPhase::HoldingPattern);
+
+        // Land a real killing blow through the dragon's body part. An airborne
+        // dragon claws back to one point of health and enters the death flight
+        // instead of dying immediately.
+        let source = DamageSource::environment(&vanilla_damage_types::EXPLOSION);
+        assert!(
+            dragon.hurt_server(&world, &source, 1000.0),
+            "the body hit must be accepted"
+        );
+        assert_eq!(dragon.get_health(), 1.0, "airborne dragon survives at one point");
+
+        // Run the 200-tick death animation; the final tick must notify the fight.
         for _ in 0..200 {
             dragon.tick_death();
         }

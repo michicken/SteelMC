@@ -445,9 +445,10 @@ mod tests {
         init_vanilla_registry();
         crate::behavior::init_behaviors();
         crate::block_entity::init_block_entities();
-        let fixture = fresh_test_world(key);
+        // Leaked so the damage history backing a real killing blow stays alive.
+        let fixture = Box::leak(Box::new(fresh_test_world(key)));
         insert_ready_full_chunk(&fixture.world, ChunkPos::new(0, 0));
-        fixture.world
+        Arc::clone(&fixture.world)
     }
 
     #[test]
@@ -472,6 +473,33 @@ mod tests {
             |entity| entity.downcast_ref::<crate::entity::entities::ItemEntity>().is_some(),
         );
         assert!(!items.is_empty(), "nether star item entity should be spawned");
+    }
+
+    #[test]
+    fn a_real_killing_blow_drops_the_nether_star() {
+        let world = wither_world("wither_real_death");
+        let wither = Arc::new(WitherBossEntity::new(
+            &vanilla_entities::WITHER,
+            next_entity_id(),
+            DVec3::new(0.5, 65.0, 0.5),
+            Arc::downgrade(&world),
+        ));
+        let entity: SharedEntity = wither.clone();
+        world.try_add_entity(Arc::clone(&entity)).expect("wither add");
+        *wither.age.lock() = super::SPAWN_INVULNERABLE_TICKS;
+
+        let source = DamageSource::environment(&vanilla_damage_types::EXPLOSION);
+        assert!(
+            wither.hurt_server(&world, &source, 400.0),
+            "damage after the spawn window must land"
+        );
+        assert!(wither.is_dead_or_dying(), "the wither must die from the hit");
+
+        let items = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(-2.0, 64.0, -2.0, 2.0, 66.0, 2.0),
+            |entity| entity.downcast_ref::<crate::entity::entities::ItemEntity>().is_some(),
+        );
+        assert!(!items.is_empty(), "a real death must drop the nether star");
     }
 
     #[test]
