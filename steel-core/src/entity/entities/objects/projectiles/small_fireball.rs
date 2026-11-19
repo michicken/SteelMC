@@ -1,4 +1,7 @@
-//! Small fireball projectile entity (`SmallFireball`), used by fire charges.
+//! Blaze fireball projectile entity (`SmallFireball`).
+//!
+//! Deals 5 fire damage and ignites its target, places fire on block impact
+//! (respecting `mobGriefing`), then discards itself.
 
 use std::sync::Arc;
 use std::sync::Weak;
@@ -7,28 +10,41 @@ use glam::DVec3;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
-use steel_protocol::packets::game::SoundSource;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::entity_type::EntityTypeRef;
-use steel_registry::{vanilla_blocks, vanilla_damage_types};
+use steel_registry::item_stack::ItemStack;
+use steel_registry::vanilla_damage_types;
+use steel_registry::vanilla_entity_data::SmallFireballEntityData;
+use steel_registry::vanilla_game_rules::MOB_GRIEFING;
+use steel_utils::locks::SyncMutex;
 use steel_utils::types::UpdateFlags;
-use steel_utils::{DowncastType, DowncastTypeKey};
+use steel_utils::{DowncastType, DowncastTypeKey, TICKS_PER_SECOND};
 
 use crate::behavior::blocks::FireBlock;
+use crate::enchantment_helper::{self, EnchantmentPostAttackContext};
 use crate::entity::damage::DamageSource;
+use crate::entity::entity::EntityEventSource as _;
 use crate::entity::{
-    AbstractHurtingProjectile, Entity, EntityBase, EntityBaseLoad, HurtingProjectileBase, Projectile,
-    ProjectileBase, ProjectileHit, RemovalReason, SharedEntity, next_entity_id,
+    AbstractHurtingProjectile, Entity, EntityBase, EntityBaseLoad, EntitySyncedData, Fireball,
+    HurtingProjectileBase, Projectile, ProjectileBase, ProjectileHit, RemovalReason, SharedEntity,
 };
-use crate::world::World;
-use crate::world::ClipHitResult;
+use crate::world::{ClipHitResult, World};
 
-/// A small fireball (fire charge projectile).
+const FIREBALL_DAMAGE: f32 = 5.0;
+const FIREBALL_IGNITE_TICKS: i32 = 5 * TICKS_PER_SECOND;
+
+/// A small fireball fired by a blaze.
 #[entity_behavior(class = "SmallFireball")]
 pub struct SmallFireballEntity {
+    /// Common entity fields (id, uuid, position, etc.).
     base: EntityBase,
+    /// Vanilla entity type registered for this implementation.
     entity_type: EntityTypeRef,
+    /// Synced data carrying the rendered item stack.
+    entity_data: SyncMutex<SmallFireballEntityData>,
+    /// Shared `Projectile` state (owner / left-owner / has-been-shot).
     projectile_base: ProjectileBase,
+    /// Shared `AbstractHurtingProjectile` state (acceleration power).
     hurting_projectile_base: HurtingProjectileBase,
 }
 
@@ -38,37 +54,31 @@ unsafe impl DowncastType for SmallFireballEntity {
 }
 
 impl SmallFireballEntity {
+    /// Creates a new small fireball with no owner.
     #[must_use]
     pub fn new(entity_type: EntityTypeRef, id: i32, position: DVec3, world: Weak<World>) -> Self {
-        Self {
-            base: EntityBase::new(id, position, entity_type.dimensions, world),
+        Self::with_base(
             entity_type,
-            projectile_base: ProjectileBase::new(),
-            hurting_projectile_base: HurtingProjectileBase::default(),
-        }
+            EntityBase::new(id, position, entity_type.dimensions, world),
+        )
     }
 
+    /// Creates a small fireball from saved base data.
     #[must_use]
     pub fn from_saved(entity_type: EntityTypeRef, load: EntityBaseLoad) -> Self {
-        Self {
-            base: EntityBase::from_load(load, entity_type.dimensions),
+        Self::with_base(
             entity_type,
-            projectile_base: ProjectileBase::new(),
-            hurting_projectile_base: HurtingProjectileBase::default(),
-        }
+            EntityBase::from_load(load, entity_type.dimensions),
+        )
     }
 
-    fn ignite_hit_block(&self, hit: &ClipHitResult) {
-        let Some(world) = self.level() else {
-            return;
-        };
-        let pos = hit.block_pos.relative(hit.direction);
-        if FireBlock::can_be_placed_at(&world, pos, hit.direction) {
-            world.set_block(
-                pos,
-                FireBlock::get_state(world.as_ref(), pos),
-                UpdateFlags::UPDATE_ALL,
-            );
+    fn with_base(entity_type: EntityTypeRef, base: EntityBase) -> Self {
+        Self {
+            base,
+            entity_type,
+            entity_data: SyncMutex::new(SmallFireballEntityData::new()),
+            projectile_base: ProjectileBase::new(),
+            hurting_projectile_base: HurtingProjectileBase::default(),
         }
     }
 }
@@ -102,12 +112,18 @@ impl Entity for SmallFireballEntity {
         self.get_owner()
     }
 
+    fn synced_data(&self) -> Option<&dyn EntitySyncedData> {
+        Some(&self.entity_data)
+    }
+
+    fn play_entity_on_fire_extinguished_sound(&self) {}
+
     fn save_additional(&self, nbt: &mut NbtCompound) {
-        self.save_hurting_projectile(nbt);
+        self.save_fireball(nbt);
     }
 
     fn load_additional(&self, nbt: BorrowedNbtCompoundView<'_, '_>) {
-        self.load_hurting_projectile(nbt);
+        self.load_fireball(nbt);
     }
 }
 
@@ -116,28 +132,76 @@ impl Projectile for SmallFireballEntity {
         &self.projectile_base
     }
 
+    fn can_hit_entity(&self, entity: &dyn Entity) -> bool {
+        self.hurting_can_hit_entity(entity)
+    }
+
+    fn on_deflection(&self, by_attack: bool) {
+        self.hurting_on_deflection(by_attack);
+    }
+
     fn on_hit(self: Arc<Self>, hit: &ProjectileHit) {
         Arc::clone(&self).projectile_on_hit(hit);
+        self.set_removed(RemovalReason::Discarded);
     }
 
     fn on_hit_entity(self: Arc<Self>, entity: &SharedEntity, _location: DVec3) {
         let Some(world) = entity.level() else {
             return;
         };
-        let mut damage =
-            DamageSource::environment(&vanilla_damage_types::FIREBALL)
-                .with_direct_entity(Arc::clone(&self) as SharedEntity);
-        if let Some(owner) = self.get_owner() {
-            damage = damage.with_causing_entity(owner);
+
+        let remaining_fire_ticks = entity.remaining_fire_ticks();
+        entity.ignite_for_ticks(FIREBALL_IGNITE_TICKS);
+
+        let owner = self.get_owner();
+        let damage_type = if owner.is_some() {
+            &vanilla_damage_types::FIREBALL
+        } else {
+            &vanilla_damage_types::UNATTRIBUTED_FIREBALL
+        };
+        let mut source = DamageSource::environment(damage_type)
+            .with_direct_entity(Arc::<Self>::clone(&self).into_shared_entity());
+        if let Some(owner) = owner {
+            source = source.with_causing_entity(owner);
         }
-        entity.hurt(&world, &damage, 5.0);
-        entity.ignite_for_ticks(100);
-        self.set_removed(RemovalReason::Discarded);
+
+        if entity.hurt(&world, &source, FIREBALL_DAMAGE) {
+            let context = EnchantmentPostAttackContext::new(entity, &source);
+            enchantment_helper::do_post_attack_effects(&world, entity.as_ref(), &context);
+        } else {
+            // Vanilla restores the fire ticks it set before the failed hurt.
+            entity.set_remaining_fire_ticks(remaining_fire_ticks);
+        }
     }
 
     fn on_hit_block(self: Arc<Self>, hit: &ClipHitResult) {
-        self.ignite_hit_block(hit);
-        self.set_removed(RemovalReason::Discarded);
+        self.projectile_on_hit_block(hit);
+        let Some(world) = self.level() else {
+            return;
+        };
+
+        // Vanilla only lets mob-owned fireballs place fire when `mobGriefing` is on.
+        let owner = self.get_owner();
+        let may_place = owner
+            .as_deref()
+            .is_none_or(|owner| owner.as_mob().is_none() || world.get_game_rule(&MOB_GRIEFING));
+        if !may_place {
+            return;
+        }
+
+        let pos = hit.block_pos.relative(hit.direction);
+        if !world.get_block_state(pos).is_air() {
+            return;
+        }
+        world.set_block(
+            pos,
+            FireBlock::get_state(world.as_ref(), pos),
+            UpdateFlags::UPDATE_ALL,
+        );
+    }
+
+    fn hurt(&self, _world: &World, _source: &DamageSource, _amount: f32) -> bool {
+        false
     }
 }
 
@@ -147,53 +211,73 @@ impl AbstractHurtingProjectile for SmallFireballEntity {
     }
 }
 
+impl Fireball for SmallFireballEntity {
+    fn get_item(&self) -> ItemStack {
+        self.entity_data.lock().fireball().item_stack.get().clone()
+    }
+
+    fn set_item(&self, item: ItemStack) {
+        self.entity_data.lock().fireball_mut().item_stack.set(item);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use glam::DVec3;
-    use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_entities};
-    use steel_utils::types::UpdateFlags;
-    use steel_utils::{BlockPos, ChunkPos, Direction};
-
-    use crate::behavior::init_behaviors;
-    use crate::entity::{Entity, Projectile};
-    use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
-    use crate::world::ClipHitResult;
+    use steel_registry::{init_vanilla_registry, vanilla_entities};
+    use steel_utils::ChunkPos;
 
     use super::*;
+    use crate::entity::entities::{BlazeEntity, PigEntity};
+    use crate::entity::projectile::EntityHitResult;
+    use crate::entity::{
+        Entity, LivingEntity, Projectile, ProjectileHit, SharedEntity, next_entity_id,
+    };
+    use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
 
     #[test]
-    fn block_hit_places_real_fire_on_the_adjacent_face() {
+    fn hit_entity_ignites_for_five_seconds_and_deals_five_damage() {
         init_vanilla_registry();
-        init_behaviors();
-        let fixture = fresh_test_world("small_fireball_block_hit");
-        insert_ready_full_chunk(&fixture.world, ChunkPos::new(0, 0));
-        assert!(fixture.world.set_block(
-            BlockPos::new(8, 63, 8),
-            vanilla_blocks::STONE.default_state(),
-            UpdateFlags::UPDATE_NONE,
+        let fixture = fresh_test_world("small_fireball_hit_entity");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let blaze = Arc::new(BlazeEntity::new(
+            &vanilla_entities::BLAZE,
+            next_entity_id(),
+            DVec3::new(4.0, 65.0, 8.0),
+            Arc::downgrade(world),
         ));
+        let pig = Arc::new(PigEntity::new(
+            &vanilla_entities::PIG,
+            next_entity_id(),
+            DVec3::new(8.0, 65.0, 8.0),
+            Arc::downgrade(world),
+        ));
+        let owner: SharedEntity = Arc::<BlazeEntity>::clone(&blaze);
+        let target: SharedEntity = Arc::<PigEntity>::clone(&pig);
+        world
+            .try_add_entity(Arc::clone(&target))
+            .expect("target should attach to the loaded chunk");
+
         let fireball = Arc::new(SmallFireballEntity::new(
             &vanilla_entities::SMALL_FIREBALL,
-            1,
-            DVec3::new(8.5, 65.0, 8.5),
-            Arc::downgrade(&fixture.world),
+            next_entity_id(),
+            DVec3::new(7.0, 65.5, 8.0),
+            Arc::downgrade(world),
         ));
-        let hit = ClipHitResult {
-            location: DVec3::new(8.5, 64.0, 8.5),
-            direction: Direction::Up,
-            block_pos: BlockPos::new(8, 63, 8),
-            miss: false,
-            inside: false,
-            world_border_hit: false,
-        };
-        Arc::clone(&fireball).on_hit_block(&hit);
-        assert_eq!(
-            fixture.world.get_block_state(BlockPos::new(8, 64, 8)).get_block(),
-            &vanilla_blocks::FIRE,
-            "small fireball must place fire on impact"
-        );
-        assert!(fireball.is_removed(), "small fireball must discard on impact");
+        fireball.set_owner_entity(Some(&owner));
+
+        let hit = ProjectileHit::Entity(EntityHitResult {
+            entity: target,
+            location: DVec3::new(7.5, 65.5, 8.0),
+        });
+        Arc::clone(&fireball).on_hit(&hit);
+
+        assert_eq!(pig.get_health(), 5.0);
+        assert_eq!(pig.remaining_fire_ticks(), FIREBALL_IGNITE_TICKS);
+        assert!(Entity::is_removed(fireball.as_ref()));
     }
 }

@@ -4,7 +4,9 @@ pub mod mobs;
 pub mod objects;
 
 pub use mobs::ambient::BatEntity;
-pub use mobs::hostile::{EndermiteEntity, SkeletonEntity, SpiderEntity, ZombieEntity};
+pub use mobs::hostile::{
+    BlazeEntity, EndermiteEntity, SkeletonEntity, SpiderEntity, ZombieEntity,
+};
 pub use mobs::passive::*;
 pub use mobs::passive::{DonkeyEntity, LlamaEntity, MuleEntity, TraderLlamaEntity};
 pub use mobs::hostile::sulfur_cube::SulfurCubeEntity;
