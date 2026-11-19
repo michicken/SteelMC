@@ -1655,7 +1655,6 @@ mod tests {
             let mut farthest_step = 0;
             for tick in 0..200 {
                 tick_test_world(&world, 1, true);
-                tick_block_entities(&world, 3);
                 world.run_block_events();
                 for step in 1..=12 {
                     let x = origin.x() + travel_sign * step;
@@ -1802,7 +1801,6 @@ mod tests {
         let mut farthest_east = 0;
         for _ in 0..240 {
             tick_test_world(&world, 1, true);
-            tick_block_entities(&world, 3);
             world.run_block_events();
             for step in 0..=10 {
                 let x = origin.x() + step;
@@ -1840,7 +1838,6 @@ mod tests {
         let mut farthest_west = 0;
         for _ in 0..200 {
             tick_test_world(&world, 1, true);
-            tick_block_entities(&world, 3);
             world.run_block_events();
             for step in 1..=12 {
                 let x = return_origin.x() - step;
@@ -1859,4 +1856,8 @@ mod tests {
             "the return engine must fly west (max step {farthest_west})"
         );
     }
+
+
+
+
 }

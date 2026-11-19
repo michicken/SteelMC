@@ -8,16 +8,20 @@
 use std::sync::Arc;
 
 use steel_registry::item_stack::ItemStack;
+use steel_protocol::packets::game::{CMerchantOffers, MerchantOfferPacket};
 use steel_registry::vanilla_menu_types;
 use steel_utils::locks::{IntoShared, Shared};
+use steel_utils::Downcast as _;
 
-use crate::entity::Entity as _;
+use crate::entity::Entity;
 use crate::entity::entities::VillagerEntity;
+use crate::world::World;
 use crate::inventory::container::{Container as _, ResultContainer, SimpleContainer};
 use crate::inventory::lock::{ContainerId, ContainerLockGuard, ContainerRef};
 use crate::inventory::prelude::*;
 use crate::inventory::slots::ResultHandler;
 use crate::player::Player;
+use crate::player::connection::NetworkConnection as _;
 use crate::player::player_inventory::{PlayerInventory, Prediction};
 
 /// Builds the merchant menu for `villager`.
@@ -25,7 +29,8 @@ use crate::player::player_inventory::{PlayerInventory, Prediction};
 pub fn merchant(
     inventory: Shared<PlayerInventory>,
     container_id: u8,
-    villager: Arc<VillagerEntity>,
+    world: std::sync::Weak<World>,
+    villager_id: i32,
 ) -> Menu {
     let payment_container = SimpleContainer::new(2).into_shared();
     let payment_ref = ContainerRef::from(Arc::clone(&payment_container));
@@ -35,7 +40,8 @@ pub fn merchant(
     let mut builder = MenuBuilder::new(&vanilla_menu_types::MERCHANT, container_id);
     let payment = builder.section_all(&payment_container);
     let first = builder.result_slot(MerchantResultHandler::new(
-        Arc::clone(&villager),
+        world.clone(),
+        villager_id,
         0,
         Arc::clone(&payment_container),
         Arc::clone(&result_one),
@@ -46,7 +52,8 @@ pub fn merchant(
     builder.route(first, player.all(), FillDirection::Backward);
 
     builder.build(MerchantKind {
-        villager,
+        world,
+        villager_id,
         payment_ref,
         payment_container,
         result_one,
@@ -55,7 +62,8 @@ pub fn merchant(
 
 /// One result preview backed by a live villager offer.
 struct MerchantResultHandler {
-    villager: Arc<VillagerEntity>,
+    world: std::sync::Weak<World>,
+    villager_id: i32,
     index: usize,
     payment: Shared<SimpleContainer>,
     result: Shared<ResultContainer>,
@@ -63,21 +71,31 @@ struct MerchantResultHandler {
 
 impl MerchantResultHandler {
     const fn new(
-        villager: Arc<VillagerEntity>,
+        world: std::sync::Weak<World>,
+        villager_id: i32,
         index: usize,
         payment: Shared<SimpleContainer>,
         result: Shared<ResultContainer>,
     ) -> Self {
         Self {
-            villager,
+            world,
+            villager_id,
             index,
             payment,
             result,
         }
     }
 
+    fn with_villager<T>(&self, f: impl FnOnce(&VillagerEntity) -> T) -> Option<T> {
+        let world = self.world.upgrade()?;
+        let entity = world.get_entity_by_id(self.villager_id)?;
+        let villager = entity.downcast_ref::<VillagerEntity>()?;
+        Some(f(villager))
+    }
+
     fn offer(&self) -> Option<crate::entity::entities::MerchantOffer> {
-        self.villager.trade_offers().get(self.index).cloned()
+        self.with_villager(|villager| villager.trade_offers().get(self.index).cloned())
+            .flatten()
     }
 }
 
@@ -100,8 +118,9 @@ impl ResultHandler for MerchantResultHandler {
     }
 
     fn on_result_taken(&self, guard: &mut ContainerLockGuard, player: &Player) -> Option<ItemStack> {
-        match self.villager.trade_with(player, self.index) {
-            Ok(_) => {
+        let outcome = self.with_villager(|villager| villager.trade_with(player, self.index));
+        match outcome {
+            Some(Ok(_)) => {
                 if let Some(payment) = guard.get_mut(ContainerId::from_arc(&self.payment)) {
                     payment.set_item(0, ItemStack::empty());
                     payment.set_item(1, ItemStack::empty());
@@ -110,7 +129,7 @@ impl ResultHandler for MerchantResultHandler {
             }
             // The result slot was already emptied by the caller; hand it back as
             // overflow so a failed trade cannot silently eat the preview item.
-            Err(_) => self.offer().map(|offer| offer.gives),
+            Some(Err(_)) | None => self.offer().map(|offer| offer.gives),
         }
     }
 
@@ -136,7 +155,8 @@ impl ResultHandler for MerchantResultHandler {
 
 /// Per-menu merchant state.
 pub struct MerchantKind {
-    villager: Arc<VillagerEntity>,
+    world: std::sync::Weak<World>,
+    villager_id: i32,
     payment_ref: ContainerRef,
     payment_container: Shared<SimpleContainer>,
     result_one: Shared<ResultContainer>,
@@ -154,20 +174,60 @@ impl MenuKind for MerchantKind {
         &mut self,
         behavior: &mut MenuBehavior,
         guard: &mut ContainerLockGuard,
-        _player: &Player,
+        player: &Player,
     ) {
+        if let Some(world) = self.world.upgrade()
+            && let Some(entity) = world.get_entity_by_id(self.villager_id)
+            && let Some(villager) = entity.downcast_ref::<VillagerEntity>()
+        {
+            let offers = villager
+                .trade_offers()
+                .iter()
+                .map(|offer| MerchantOfferPacket {
+                    cost_a: offer
+                        .wants
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(ItemStack::empty),
+                    cost_b: offer
+                        .wants
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_else(ItemStack::empty),
+                    result: offer.gives.clone(),
+                    reward_experience: offer.xp > 0,
+                    villager_xp: offer.xp,
+                    special_price: offer.special_price,
+                    demand: offer.demand,
+                    price_multiplier: offer.price_multiplier,
+                })
+                .collect();
+            player.send_packet(CMerchantOffers {
+                container_id: i32::from(behavior.container_id()),
+                offers,
+            });
+        }
         let preview = self
-            .villager
-            .trade_offers()
-            .first()
-            .map_or_else(ItemStack::empty, |offer| offer.gives.clone());
+            .world
+            .upgrade()
+            .and_then(|world| world.get_entity_by_id(self.villager_id))
+            .and_then(|entity| {
+                entity
+                    .downcast_ref::<VillagerEntity>()
+                    .and_then(|villager| villager.trade_offers().first().cloned())
+            })
+            .map_or_else(ItemStack::empty, |offer| offer.gives);
         if let Some(container) = guard.get_mut(ContainerId::from_arc(&self.result_one)) {
             container.set_item(0, preview);
         }
     }
 
     fn still_valid(&self, _behavior: &MenuBehavior, _player: &Player) -> bool {
-        self.villager.is_alive()
+        self.world
+            .upgrade()
+            .and_then(|world| world.get_entity_by_id(self.villager_id))
+            .and_then(|entity| entity.downcast_ref::<VillagerEntity>().map(Entity::is_alive))
+            .unwrap_or(false)
     }
 
     fn can_take_item_for_pick_all(&self, _carried: &ItemStack, slot_index: usize) -> bool {
@@ -216,7 +276,12 @@ mod tests {
         assert_eq!(villager.trade_offers().len(), 5);
 
         let player = TestPlayerBuilder::new(Arc::clone(&fixture.world), "MerchantViewer", 1).build();
-        let menu = merchant(Arc::clone(&player.inventory), 1, villager);
+        let menu = merchant(
+            Arc::clone(&player.inventory),
+            1,
+            Arc::downgrade(&fixture.world),
+            villager.id(),
+        );
         assert_eq!(
             menu.menu_type().map(|kind| kind.key.clone()),
             Some(vanilla_menu_types::MERCHANT.key.clone()),

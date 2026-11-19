@@ -550,6 +550,7 @@ impl PistonMovingState {
         if new_state.try_get_value(&BlockStateProperties::WATERLOGGED) == Some(true) {
             new_state = new_state.set_value(&BlockStateProperties::WATERLOGGED, false);
         }
+
         let tnt_duper = new_state.get_block() == &vanilla_blocks::TNT
             && world.has_neighbor_signal(pos);
         if tnt_duper {
@@ -659,7 +660,7 @@ impl BlockEntity for PistonMovingBlockEntity {
             let mut moving = self.moving.lock();
             moving.last_ticked = game_time;
             moving.progress_o = moving.progress;
-            let new_progress = (moving.progress_o < 1.0).then(|| moving.progress + 0.5);
+            let new_progress = (moving.progress_o < 1.0).then(|| (moving.progress + 0.5).min(1.0));
             (*moving, new_progress)
         };
         let pos = self.get_block_pos();
@@ -674,7 +675,20 @@ impl BlockEntity for PistonMovingBlockEntity {
 
         moving.move_collided_entities(world, pos, new_progress);
         moving.move_stuck_entities(world, pos, new_progress);
-        self.moving.lock().progress = new_progress.min(1.0);
+        {
+            let mut state = self.moving.lock();
+            state.progress = new_progress;
+        }
+        // Vanilla finishes in the same tick the progress reaches 1.0. Waiting
+        // one extra tick leaves the moving block in place while a two-tick
+        // observer pulse has already ended, which jams flying machines.
+        if new_progress >= 1.0 {
+            let owned_position = world.remove_block_entity_if_same(self);
+            self.set_removed();
+            if owned_position {
+                moving.finish_tick(world, pos);
+            }
+        }
     }
 }
 

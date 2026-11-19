@@ -124,11 +124,16 @@ impl BlockBehavior for ObserverBlock {
         // Vanilla observers re-arm when a piston moves them: the block they
         // were watching is no longer in the same place, so they must emit a
         // fresh pulse after settling. Flying-machine engines depend on this.
-        if moved_by_piston && !world.has_scheduled_block_tick(pos, self.block) {
-            // Fire on the next tick, while the mover still holds the observer
-            // next to the slime it must power. Vanilla does not wait the full
-            // two-tick output delay here.
+        // A powered observer that is moved mid-pulse must still deliver its
+        // turn-off tick at the destination. The scheduled tick stays behind on
+        // the old position, so re-arm the off phase here.
+        if moved_by_piston
+            && state.get_value(POWERED)
+            && !world.has_scheduled_block_tick(pos, self.block)
+        {
             world.schedule_block_tick_default(pos, self.block, 0);
+        } else {
+            let _ = moved_by_piston;
         }
 
         if state.get_block() == old_state.get_block()

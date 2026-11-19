@@ -27,6 +27,7 @@ mod c_level_particles;
 mod c_login;
 mod c_move_entity;
 mod c_move_vehicle;
+mod c_merchant_offers;
 mod c_open_screen;
 mod c_open_sign_editor;
 mod c_player_abilities;
@@ -143,6 +144,7 @@ pub use c_move_entity::{
     calc_delta, to_angle_byte,
 };
 pub use c_move_vehicle::CMoveVehicle;
+pub use c_merchant_offers::{CMerchantOffers, MerchantOfferPacket};
 pub use c_open_screen::COpenScreen;
 pub use c_open_sign_editor::COpenSignEditor;
 pub use c_player_abilities::{CPlayerAbilities, ability_flags};

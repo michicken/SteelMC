@@ -6,7 +6,10 @@ mod trade_table;
 
 pub use merchant::{MerchantOffer, TradeError, TradeOutcome, level_for_xp};
 
+use std::sync::Arc;
+
 use glam::DVec3;
+use text_components::TextComponent;
 use rand::Rng;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
@@ -15,6 +18,9 @@ use steel_protocol::packets::game::SoundSource;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::VillagerEntityData;
+use steel_utils::types::InteractionHand;
+use crate::behavior::InteractionResult;
+use crate::inventory::menu::kinds::merchant;
 use steel_registry::{REGISTRY, RegistryExt as _, sound_events, vanilla_attributes};
 use steel_utils::locks::SyncMutex;
 use steel_utils::nbt::NbtValueInput as _;
@@ -319,6 +325,33 @@ impl Entity for VillagerEntity {
         self.play_sound(&sound_events::ENTITY_VILLAGER_AMBIENT, 0.15, 1.0);
     }
 
+    fn interact(
+        &self,
+        player: &crate::player::Player,
+        hand: InteractionHand,
+        _location: glam::DVec3,
+    ) -> InteractionResult {
+        if hand != InteractionHand::MainHand {
+            return InteractionResult::Pass;
+        }
+        let Some(world) = self.level() else {
+            return InteractionResult::Pass;
+        };
+        let villager_id = self.base().id();
+        player.open_menu(
+            TextComponent::plain("Merchant"),
+            move |context| {
+                merchant(
+                    Arc::clone(&context.player.inventory),
+                    context.container_id,
+                    Arc::downgrade(&world),
+                    villager_id,
+                )
+            },
+        );
+        InteractionResult::Consume
+    }
+
     fn save_additional(&self, nbt: &mut NbtCompound) {
         self.save_mob(nbt);
     }
@@ -425,12 +458,15 @@ mod tests {
     use std::sync::Arc;
 
     use glam::DVec3;
+    use text_components::TextComponent;
     use steel_registry::{init_vanilla_registry, vanilla_attributes, vanilla_entities};
     use steel_utils::{ChunkPos, Downcast as _};
 
     use super::VillagerEntity;
+    use crate::behavior::InteractionResult;
     use crate::entity::{Entity, LivingEntity, Mob, SharedEntity, next_entity_id};
-    use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
+    use crate::test_support::{TestPlayerBuilder, fresh_test_world, insert_ready_full_chunk};
+    use steel_utils::types::InteractionHand;
 
     #[test]
     fn villager_spawns_with_vanilla_health_and_stays_passive() {
@@ -461,4 +497,27 @@ mod tests {
         );
         assert!(concrete.get_health() > 0.0);
     }
+    #[test]
+    fn villager_interact_opens_the_merchant_menu() {
+        init_vanilla_registry();
+        let fixture = fresh_test_world("villager_merchant_interact");
+        insert_ready_full_chunk(&fixture.world, ChunkPos::new(0, 0));
+        let villager: SharedEntity = Arc::new(VillagerEntity::new(
+            &steel_registry::vanilla_entities::VILLAGER,
+            next_entity_id(),
+            DVec3::new(8.0, 64.0, 8.0),
+            Arc::downgrade(&fixture.world),
+        ));
+        fixture.world.try_add_entity(Arc::clone(&villager)).expect("villager enters world");
+        let player = TestPlayerBuilder::new(Arc::clone(&fixture.world), "MerchantCustomer", 1).build();
+
+        let result = villager.interact(
+            &player,
+            InteractionHand::MainHand,
+            DVec3::new(8.0, 64.0, 8.0),
+        );
+        assert_eq!(result, InteractionResult::Consume);
+        player.tick_open_menu();
+    }
+
 }

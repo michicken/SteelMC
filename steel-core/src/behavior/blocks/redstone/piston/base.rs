@@ -283,6 +283,12 @@ impl PistonBaseBlock {
             let moving_state = vanilla_blocks::MOVING_PISTON
                 .default_state()
                 .set_value(FACING, direction);
+            // A moved block keeps its pending scheduled tick. Observers mid-pulse
+            // must finish their pulse at the destination or the flying-machine
+            // clock loses a phase and stalls after the first step.
+            if world.has_scheduled_block_tick(pos, state.get_block()) {
+                world.schedule_block_tick_default(destination, state.get_block(), 2);
+            }
             world.set_block(destination, moving_state, UPDATE_MOVING_BLOCK);
             world.set_block_entity(Self::moving_block_entity(
                 world,
