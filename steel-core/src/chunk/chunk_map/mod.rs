@@ -97,6 +97,8 @@ const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65_536;
 /// Squared block distance from a chunk center within which a non-spectator
 /// player makes that chunk a natural-spawn candidate.
 const SPAWN_CANDIDATE_PLAYER_DISTANCE_SQUARED: f64 = 16_384.0;
+/// Chunk radius around a player tracked by vanilla's natural-spawn counter.
+const NATURAL_SPAWN_CHUNK_RADIUS: i32 = 8;
 
 /// Lifetime, in ticks, of a thrown ender pearl's chunk ticket (vanilla
 /// `TicketType.ENDER_PEARL` timeout). The pearl refreshes it every
@@ -862,12 +864,12 @@ impl ChunkMap {
         }
     }
 
-    /// Advances inhabited time for block-ticking chunks that are natural-spawn candidates.
+    /// Advances inhabited time for loaded Full chunks that are natural-spawn candidates.
     ///
     /// Vanilla's spawn-candidate tracker only retains chunks near a non-spectator
     /// player, and `collectSpawningChunks` still requires the chunk center to be
     /// within 128 blocks of that player.
-    fn tick_spawning_chunks(world: &World, tickable_chunks: &TickingChunkSnapshot) {
+    fn tick_spawning_chunks(&self, world: &World) {
         let mut player_positions = Vec::new();
         world.players.iter_players(|_, player| {
             if !player.is_spectator() {
@@ -875,24 +877,41 @@ impl ChunkMap {
             }
             true
         });
-        if player_positions.is_empty() {
+        // The radius square bounds every chunk within spawn distance, so checking
+        // distance against the producing player yields the full spawning set.
+        // The set dedups chunks near several players so each ticks once.
+        let mut spawning_chunks = FxHashSet::default();
+        for &position in &player_positions {
+            let ChunkPos(center) = ChunkPos::from_entity_pos(position);
+            for x in center.x - NATURAL_SPAWN_CHUNK_RADIUS..=center.x + NATURAL_SPAWN_CHUNK_RADIUS {
+                for z in
+                    center.y - NATURAL_SPAWN_CHUNK_RADIUS..=center.y + NATURAL_SPAWN_CHUNK_RADIUS
+                {
+                    let pos = ChunkPos::new(x, z);
+                    let delta_x = f64::from(pos.middle_block_x()) - position.x;
+                    let delta_z = f64::from(pos.middle_block_z()) - position.z;
+                    if delta_x * delta_x + delta_z * delta_z
+                        < SPAWN_CANDIDATE_PLAYER_DISTANCE_SQUARED
+                        && spawning_chunks.insert(pos)
+                    {
+                        self.tick_spawning_chunk(pos);
+                    }
+                }
+            }
+        }
+    }
+
+    fn tick_spawning_chunk(&self, pos: ChunkPos) {
+        let Some(holder) = self.chunks.read_sync(&pos, |_, holder| Arc::clone(holder)) else {
+            return;
+        };
+        if !is_block_ticking(holder.load_level())
+            || !holder.ticking_readiness_snapshot().is_block_ticking()
+        {
             return;
         }
-
-        for tickable_chunk in &tickable_chunks.block {
-            let center_x = f64::from(tickable_chunk.pos.0.x * 16 + 8);
-            let center_z = f64::from(tickable_chunk.pos.0.y * 16 + 8);
-            let is_spawn_candidate = player_positions.iter().any(|position| {
-                let delta_x = center_x - position.x;
-                let delta_z = center_z - position.z;
-                delta_x * delta_x + delta_z * delta_z < SPAWN_CANDIDATE_PLAYER_DISTANCE_SQUARED
-            });
-            if !is_spawn_candidate {
-                continue;
-            }
-            if let Some(chunk) = tickable_chunk.holder.try_full_chunk() {
-                chunk.common().increment_inhabited_time();
-            }
+        if let Some(chunk) = holder.try_full_chunk() {
+            chunk.common().increment_inhabited_time();
         }
     }
 
@@ -927,7 +946,7 @@ impl ChunkMap {
             let start = Instant::now();
             let tickable_chunks = self.ticking_chunks.load();
             timings.collect_tickable = start.elapsed();
-            Self::tick_spawning_chunks(world, &tickable_chunks);
+            self.tick_spawning_chunks(world);
             if !tickable_chunks.block.is_empty() {
                 let _span = tracing::trace_span!(
                     "scheduled_ticks",
@@ -966,6 +985,10 @@ impl ChunkMap {
             timings.collect_tickable += start.elapsed();
             timings.total_chunks = self.chunks.len();
             timings.tickable_count = tickable_chunks.block.len();
+
+            if runs_normally {
+                self.tick_spawning_chunks(world);
+            }
 
             if runs_normally && random_tick_speed > 0 && !tickable_chunks.block.is_empty() {
                 let _span = tracing::trace_span!(
