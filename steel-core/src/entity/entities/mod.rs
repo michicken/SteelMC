@@ -5,7 +5,7 @@ pub mod objects;
 
 pub use mobs::ambient::BatEntity;
 pub use mobs::hostile::{
-    BlazeEntity, EndermanEntity, EndermiteEntity, SkeletonEntity, SpiderEntity, WitherSkeletonEntity, ZombieEntity,
+    BlazeEntity, EndermanEntity, EndermiteEntity, GhastEntity, SkeletonEntity, SpiderEntity, WitherSkeletonEntity, ZombieEntity,
 };
 pub use mobs::passive::*;
 pub use mobs::passive::{DonkeyEntity, LlamaEntity, MuleEntity, TraderLlamaEntity};
@@ -18,6 +18,7 @@ pub use mobs::bosses::{EnderDragonEntity, EnderDragonPart, WitherBossEntity};
 pub use objects::display_ui::{BlockDisplayEntity, ItemFrameEntity, LeashFenceKnotEntity};
 pub use objects::effects::AreaEffectCloudEntity;
 pub use objects::explosives::{EndCrystalEntity, PrimedTntEntity};
+pub use objects::projectiles::LargeFireballEntity;
 pub use objects::items::{ExperienceOrbEntity, FallingBlockEntity, ItemEntity};
 pub use objects::projectiles::{
     ArrowEntity, EnderPearlEntity, ExperienceBottleEntity, EyeOfEnderEntity, FireworkRocketEntity,

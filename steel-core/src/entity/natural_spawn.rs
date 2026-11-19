@@ -15,7 +15,7 @@ use steel_registry::vanilla_dimension_types;
 
 use crate::chunk::light::LightLayer;
 use crate::entity::entities::{
-    BlazeEntity, ChickenEntity, CowEntity, EndermanEntity, PigEntity, SheepEntity,
+    BlazeEntity, ChickenEntity, CowEntity, EndermanEntity, GhastEntity, PigEntity, SheepEntity,
     SkeletonEntity, SpiderEntity, WitherSkeletonEntity, ZombieEntity,
 };
 use crate::entity::{Entity, SharedEntity, next_entity_id};
@@ -110,20 +110,25 @@ fn spawn_hostile_for_dimension(world: &Arc<World>, pos: BlockPos) -> SharedEntit
                 ))
             };
         }
-        return if rand::random::<bool>() {
-            Arc::new(ZombieEntity::new(
+        return match rand::random::<u8>() % 5 {
+            0 | 1 => Arc::new(ZombieEntity::new(
                 &vanilla_entities::ZOMBIE,
                 next_entity_id(),
                 pos.get_center(),
                 Arc::downgrade(world),
-            ))
-        } else {
-            Arc::new(WitherSkeletonEntity::new(
+            )),
+            2 => Arc::new(GhastEntity::new(
+                &vanilla_entities::GHAST,
+                next_entity_id(),
+                pos.get_center(),
+                Arc::downgrade(world),
+            )),
+            _ => Arc::new(WitherSkeletonEntity::new(
                 &vanilla_entities::WITHER_SKELETON,
                 next_entity_id(),
                 pos.get_center(),
                 Arc::downgrade(world),
-            ))
+            )),
         };
     }
 
