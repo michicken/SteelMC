@@ -1860,4 +1860,117 @@ mod tests {
 
 
 
+
+    fn place_two_way_engine(world: &Arc<crate::world::World>, origin: BlockPos, dir: Direction) -> (BlockPos, BlockPos) {
+        let piston_fwd = vanilla_blocks::STICKY_PISTON
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, dir);
+        let piston_back = vanilla_blocks::STICKY_PISTON
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, dir.opposite());
+        let observer_fwd = vanilla_blocks::OBSERVER
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, dir);
+        let observer_back = vanilla_blocks::OBSERVER
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, dir.opposite());
+        let sign = dir.offset_vec().x;
+        let back = BlockPos::new(origin.x(), origin.y(), origin.z());
+        let mid = BlockPos::new(origin.x() + sign, origin.y(), origin.z());
+        let front = BlockPos::new(origin.x() + sign * 2, origin.y(), origin.z());
+        // z row (origin.z): slime, observer(eye forward), piston(backward)
+        world.set_block(back, vanilla_blocks::SLIME_BLOCK.default_state(), UpdateFlags::UPDATE_NONE);
+        world.set_block(mid, observer_fwd, UpdateFlags::UPDATE_NONE);
+        world.set_block(front, piston_back, UpdateFlags::UPDATE_NONE);
+        // z+1 row: piston(forward), observer(eye backward), slime
+        let b2 = BlockPos::new(back.x(), back.y(), back.z() + 1);
+        let m2 = BlockPos::new(mid.x(), mid.y(), mid.z() + 1);
+        let f2 = BlockPos::new(front.x(), front.y(), front.z() + 1);
+        world.set_block(b2, piston_fwd, UpdateFlags::UPDATE_NONE);
+        world.set_block(m2, observer_back, UpdateFlags::UPDATE_NONE);
+        world.set_block(f2, vanilla_blocks::SLIME_BLOCK.default_state(), UpdateFlags::UPDATE_NONE);
+        (b2, front)
+    }
+
+
+    #[test]
+    fn six_block_two_way_engine_flies_in_both_mirrored_builds() {
+        steel_registry::init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        for (dir, travel_sign) in [(Direction::West, 1), (Direction::East, -1)] {
+            let name: &'static str = if dir == Direction::West {
+                "two_way_engine_eastbound"
+            } else {
+                "two_way_engine_westbound"
+            };
+            let test_world = fresh_test_world(name);
+            let world: Arc<_> = Arc::clone(&test_world.world);
+            for cx in -2..=2 {
+                insert_ready_full_chunk(&world, ChunkPos::new(cx, 0));
+            }
+            let origin = BlockPos::new(8, 64, 8);
+            let (rear_piston, front_piston) = place_two_way_engine(&world, origin, dir);
+            world.run_block_events();
+            // Vanilla start: pulse the rear piston directly; the lever/redstone
+            // block is left behind when the machine departs.
+            let sign = if dir == Direction::East { 1 } else { -1 };
+            let kick = BlockPos::new(rear_piston.x() - sign, 64, rear_piston.z());
+            world.set_block(
+                kick,
+                vanilla_blocks::REDSTONE_BLOCK.default_state(),
+                UpdateFlags::UPDATE_ALL,
+            );
+            for _ in 0..2 {
+                tick_test_world(&world, 1, true);
+                world.run_block_events();
+            }
+            world.set_block(kick, vanilla_blocks::AIR.default_state(), UpdateFlags::UPDATE_ALL);
+            for _ in 0..160 {
+                tick_test_world(&world, 1, true);
+                world.run_block_events();
+            }
+
+            let mut pistons = 0;
+            let mut observers = 0;
+            let mut slimes = 0;
+            let mut farthest = 0;
+            let mut min_x = i32::MAX;
+            let mut max_x = i32::MIN;
+            for x in -40..=60 {
+                for z in 7..=10 {
+                    let state = world.get_block_state(BlockPos::new(x, 64, z));
+                    let key = &state.get_block().key;
+                    if key == &vanilla_blocks::STICKY_PISTON.key {
+                        pistons += 1;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                    } else if key == &vanilla_blocks::OBSERVER.key {
+                        observers += 1;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                    } else if key == &vanilla_blocks::SLIME_BLOCK.key {
+                        slimes += 1;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                    }
+                    if (x, z) == (origin.x() + travel_sign * 20, origin.z()) {
+                        farthest += 1;
+                    }
+                }
+            }
+            assert_eq!(pistons, 2, "both sticky pistons must stay on the chassis: {dir:?}");
+            assert_eq!(observers, 2, "both observers must stay on the chassis: {dir:?}");
+            assert_eq!(slimes, 2, "both slime blocks must stay on the chassis: {dir:?}");
+            assert!(
+                if travel_sign > 0 { max_x >= origin.x() + 20 } else { min_x <= origin.x() - 20 },
+                "machine must travel at least 20 blocks, got range {min_x}..={max_x} for {dir:?}"
+            );
+            let _ = farthest;
+            let _ = (rear_piston, front_piston);
+        }
+    }
+
+
 }
