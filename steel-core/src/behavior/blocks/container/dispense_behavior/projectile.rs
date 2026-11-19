@@ -10,7 +10,7 @@ use steel_utils::BlockStateId;
 use super::DefaultDispenseBehavior;
 use super::DispenseItemBehavior;
 use crate::behavior::blocks::container::dispenser_block::FACING;
-use crate::entity::{ENTITIES, Entity, next_entity_id};
+use crate::entity::{ENTITIES, Entity};
 use crate::world::World;
 
 pub struct ProjectileDispenseBehavior {
@@ -54,8 +54,7 @@ impl DispenseItemBehavior for ProjectileDispenseBehavior {
             f64::from(pos.z()) + 0.5 + (f64::from(offset.z) * 0.7),
         );
 
-        let id = next_entity_id();
-        let Some(entity) = ENTITIES.create(self.entity_type, id, spawn_pos, Arc::downgrade(world))
+        let Some(entity) = ENTITIES.create(self.entity_type, spawn_pos, Arc::downgrade(world))
         else {
             return DefaultDispenseBehavior.dispense(world, pos, state, item);
         };

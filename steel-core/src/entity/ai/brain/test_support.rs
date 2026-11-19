@@ -10,7 +10,7 @@ use super::context::BrainContext;
 use super::memory::{Memories, MemoryModuleType, MemoryValue};
 use crate::bootstrap::init_globals;
 use crate::entity::registry::ENTITIES;
-use crate::entity::{SharedEntity, next_entity_id};
+use crate::entity::SharedEntity;
 use crate::test_support::test_world;
 
 /// A memory value for tests.
@@ -38,7 +38,6 @@ pub(super) fn spawn_pig() -> SharedEntity {
     ENTITIES
         .create(
             &vanilla_entities::PIG,
-            next_entity_id(),
             DVec3::ZERO,
             Arc::downgrade(test_world()),
         )
