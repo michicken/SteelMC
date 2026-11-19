@@ -387,12 +387,44 @@ mod tests {
     use glam::DVec3;
     use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_entities};
     use steel_utils::types::UpdateFlags;
-    use steel_utils::{BlockPos, ChunkPos};
+    use steel_utils::{BlockPos, ChunkPos, Downcast as _};
 
     use super::*;
     use crate::behavior::init_behaviors;
     use crate::entity::next_entity_id;
     use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
+
+    #[test]
+    fn blaze_drops_a_blaze_rod_for_brewing() {
+        init_vanilla_registry();
+        init_behaviors();
+        let fixture = fresh_test_world("blaze_rod_drop");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        let blaze = BlazeEntity::new(
+            &vanilla_entities::BLAZE,
+            next_entity_id(),
+            DVec3::new(8.5, 65.0, 8.5),
+            Arc::downgrade(world),
+        );
+        let source = crate::entity::damage::DamageSource::environment(
+            &steel_registry::vanilla_damage_types::GENERIC,
+        );
+        blaze.drop_custom_death_loot(&source, true);
+        let items = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(6.0, 64.0, 6.0, 11.0, 67.0, 11.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        assert_eq!(items.len(), 1, "blaze must drop exactly one item");
+        assert!(
+            items[0]
+                .downcast_ref::<crate::entity::entities::ItemEntity>()
+                .expect("item entity")
+                .get_item()
+                .is(&vanilla_items::BLAZE_ROD),
+            "the drop must be a blaze rod"
+        );
+    }
 
     #[test]
     fn water_damages_the_blaze_on_its_ai_step() {

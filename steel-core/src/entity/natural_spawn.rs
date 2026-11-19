@@ -278,6 +278,101 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn end_dimension_spawns_endermen_only() {
+        init_vanilla_registry();
+        init_behaviors();
+        init_block_entities();
+        let fixture = crate::test_support::fresh_test_world_with_dimension_type(
+            "natural_spawn_end",
+            "natural_spawn_end",
+            &steel_registry::vanilla_dimension_types::THE_END,
+        );
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        for x in 1..15 {
+            for z in 1..15 {
+                world.set_block(
+                    BlockPos::new(x, 64, z),
+                    vanilla_blocks::END_STONE.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+                world.set_block(
+                    BlockPos::new(x, 70, z),
+                    vanilla_blocks::END_STONE.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+            }
+        }
+        let player = TestPlayerBuilder::new(Arc::clone(world), "EndAfk", 97).build();
+        player.teleport_to(glam::DVec3::new(8.5, 65.0, 8.5)).expect("end floor");
+        assert!(world.add_player(player, ResetReason::InitialJoin));
+        assert!(tick_natural_spawns(world, 800) > 0);
+        let endermen = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 72.0, 16.0),
+            |entity| entity.entity_type() == &vanilla_entities::ENDERMAN,
+        );
+        assert!(!endermen.is_empty(), "the End must spawn endermen");
+        let non_endermen = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 72.0, 16.0),
+            |entity| {
+                entity.entity_type() == &vanilla_entities::ZOMBIE
+                    || entity.entity_type() == &vanilla_entities::SPIDER
+            }
+        );
+        assert!(non_endermen.is_empty(), "overworld mobs must not spawn in the End");
+    }
+
+    #[test]
+    fn nether_fortress_bricks_spawn_blazes_and_wither_skeletons() {
+        init_vanilla_registry();
+        init_behaviors();
+        init_block_entities();
+        let fixture = crate::test_support::fresh_test_world_with_dimension_type(
+            "natural_spawn_nether",
+            "natural_spawn_nether",
+            &steel_registry::vanilla_dimension_types::THE_NETHER,
+        );
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        for x in 1..15 {
+            for z in 1..15 {
+                world.set_block(
+                    BlockPos::new(x, 64, z),
+                    vanilla_blocks::NETHERRACK.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+                world.set_block(
+                    BlockPos::new(x, 70, z),
+                    vanilla_blocks::NETHERRACK.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+            }
+        }
+        for x in 1..15 {
+            world.set_block(
+                BlockPos::new(x, 65, 1),
+                vanilla_blocks::NETHER_BRICKS.default_state(),
+                UpdateFlags::UPDATE_ALL,
+            );
+        }
+        let player = TestPlayerBuilder::new(Arc::clone(world), "NetherAfk", 96).build();
+        player.teleport_to(glam::DVec3::new(8.5, 65.0, 8.5)).expect("nether floor");
+        assert!(world.add_player(player, ResetReason::InitialJoin));
+        assert!(tick_natural_spawns(world, 800) > 0);
+        let fortress_mobs = world
+            .get_entities_in_aabb_matching(
+                &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 72.0, 16.0),
+                |entity| {
+                    entity.entity_type() == &vanilla_entities::BLAZE
+                        || entity.entity_type() == &vanilla_entities::WITHER_SKELETON
+                },
+            )
+            .len();
+        assert!(fortress_mobs > 0, "fortress bricks must spawn blaze/wither skeletons");
+    }
+
     #[test]
     fn dark_room_spawned_zombie_drop_is_collected_below_the_kill_floor() {
         use steel_registry::{vanilla_blocks, vanilla_damage_types, vanilla_items};

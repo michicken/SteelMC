@@ -301,3 +301,60 @@ impl Monster for EndermanEntity {}
 
 impl PathfinderMob for EndermanEntity {}
 
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use glam::DVec3;
+    use steel_registry::{init_vanilla_registry, vanilla_entities, vanilla_items};
+    use steel_utils::{ChunkPos, Downcast as _};
+
+    use super::EndermanEntity;
+    use crate::entity::{Entity, LivingEntity};
+    use crate::entity::damage::DamageSource;
+    use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
+
+    #[test]
+    fn enderman_drops_an_ender_pearl() {
+        init_vanilla_registry();
+        let fixture = fresh_test_world("enderman_pearl_drop");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        let enderman = EndermanEntity::new(
+            &vanilla_entities::ENDERMAN,
+            crate::entity::next_entity_id(),
+            DVec3::new(8.5, 65.0, 8.5),
+            Arc::downgrade(world),
+        );
+        let source = DamageSource::environment(&steel_registry::vanilla_damage_types::GENERIC);
+        enderman.drop_custom_death_loot(&source, true);
+        let items = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(6.0, 64.0, 6.0, 11.0, 67.0, 11.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0]
+                .downcast_ref::<crate::entity::entities::ItemEntity>()
+                .expect("item")
+                .get_item()
+                .is(&vanilla_items::ENDER_PEARL)
+        );
+    }
+
+    #[test]
+    fn enderman_is_a_42_health_neutral_mob() {
+        init_vanilla_registry();
+        let fixture = fresh_test_world("enderman_stats");
+        let world = &fixture.world;
+        let enderman = EndermanEntity::new(
+            &vanilla_entities::ENDERMAN,
+            crate::entity::next_entity_id(),
+            DVec3::new(0.5, 65.0, 0.5),
+            Arc::downgrade(world),
+        );
+        assert_eq!(enderman.get_max_health(), 40.0);
+        assert_eq!(enderman.entity_type(), &vanilla_entities::ENDERMAN);
+    }
+}

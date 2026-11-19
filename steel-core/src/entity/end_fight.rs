@@ -136,6 +136,8 @@ mod tests {
     use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_dimension_types};
     use steel_utils::{BlockPos, Downcast as _};
 
+    use crate::entity::{Entity, LivingEntity};
+
     use super::EndFightState;
     use crate::test_support::{fresh_test_world_with_dimension_type, insert_ready_full_chunk};
 
@@ -207,6 +209,48 @@ mod tests {
         after.killed = true;
         after.tick(&world);
         assert!(after.dragon_id().is_none());
+    }
+
+
+    #[test]
+    fn a_real_dragon_death_marks_the_fight_and_builds_the_portal() {
+        let world = end_world("real_death");
+        let mut fight = EndFightState::default();
+        fight.tick(&world);
+        let id = fight.dragon_id().expect("dragon");
+        let entity = world.get_entity_by_id(id).expect("id");
+        let dragon = entity
+            .downcast_ref::<crate::entity::entities::EnderDragonEntity>()
+            .expect("dragon");
+
+        // Drop the health to zero the way combat would and run the 200-tick
+        // death animation; the final tick must notify the fight.
+        dragon.set_health(0.0);
+        for _ in 0..200 {
+            dragon.tick_death();
+        }
+        assert!(dragon.is_removed(), "death animation should remove the dragon");
+        assert!(world.is_ender_dragon_killed(), "fight must be marked killed");
+        assert!(
+            world.get_entity_by_id(id).is_none(),
+            "dead dragon must leave the world"
+        );
+
+        let podium = crate::entity::entities::mobs::bosses::ender_dragon::end_podium_location(BlockPos::ZERO);
+        let portal = (60..80)
+            .find(|y| {
+                world
+                    .get_block_state(BlockPos::new(podium.x(), *y, podium.z()))
+                    .get_block()
+                    == vanilla_blocks::END_PORTAL.default_state().get_block()
+            })
+            .expect("real dragon death must build the return portal");
+        assert!(
+            world
+                .get_block_state(BlockPos::new(podium.x(), portal + 1, podium.z()))
+                .get_block()
+                == vanilla_blocks::DRAGON_EGG.default_state().get_block()
+        );
     }
 
     #[test]
