@@ -48,7 +48,7 @@ impl WitherSkullBlock {
             if !Self::has_wither_room(world, center) {
                 continue;
             }
-            Self::spawn_wither(world, center);
+            Self::spawn_wither(world, center, direction);
             return true;
         }
         false
@@ -100,10 +100,15 @@ impl WitherSkullBlock {
         true
     }
 
-    fn spawn_wither(world: &Arc<World>, center: BlockPos) {
-        // Vanilla consumes the three skulls.
+    fn spawn_wither(world: &Arc<World>, center: BlockPos, direction: (i32, i32)) {
+        // Vanilla consumes the three skulls, stepping along the same line that
+        // `find_line_center` checked.
         for step in -1..=1 {
-            let skull_pos = BlockPos::new(center.x() + step, center.y(), center.z());
+            let skull_pos = BlockPos::new(
+                center.x() + direction.0 * step,
+                center.y(),
+                center.z() + direction.1 * step,
+            );
             world.set_block(skull_pos, vanilla_blocks::AIR.default_state(), UpdateFlags::UPDATE_ALL);
         }
 

@@ -18,6 +18,7 @@ use steel_registry::vanilla_entity_data::WitherBossEntityData;
 use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::item_stack::ItemStack;
+use steel_utils::nbt::NbtValueInput as _;
 use steel_utils::translations;
 use text_components::TextComponent;
 use steel_utils::locks::SyncMutex;
@@ -145,6 +146,8 @@ impl WitherBossEntity {
                 TextComponent::translated(translations::ENTITY_MINECRAFT_WITHER.msg()),
                 progress,
                 5,
+                0,
+                0,
             ));
             return;
         }
@@ -323,10 +326,12 @@ impl Entity for WitherBossEntity {
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
         self.save_mob(nbt);
+        nbt.insert("Age", *self.age.lock());
     }
 
     fn load_additional(&self, nbt: BorrowedNbtCompoundView<'_, '_>) {
         self.load_mob(nbt);
+        *self.age.lock() = nbt.int_value("Age").unwrap_or(0);
     }
 }
 
@@ -426,9 +431,12 @@ impl PathfinderMob for WitherBossEntity {}
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::io::Cursor;
+    use std::sync::{Arc, Weak};
 
     use glam::DVec3;
+    use simdnbt::borrow::read_compound as read_borrowed_compound;
+    use simdnbt::owned::NbtCompound;
     use steel_registry::blocks::block_state_ext::BlockStateExt as _;
     use steel_registry::{
         init_vanilla_registry, vanilla_blocks, vanilla_damage_types, vanilla_entities,
@@ -529,6 +537,66 @@ mod tests {
             world.get_block_state(BlockPos::new(1, 65, 0)).get_block(),
             &vanilla_blocks::AIR
         );
+    }
+
+    #[test]
+    fn three_skulls_on_a_z_axis_line_summon_the_wither_and_clear_every_skull() {
+        let world = wither_world("wither_summon_z");
+        for z in 0..3 {
+            world.set_block(
+                BlockPos::new(0, 64, z),
+                vanilla_blocks::SOUL_SAND.default_state(),
+                UpdateFlags::UPDATE_ALL,
+            );
+        }
+        for z in 0..3 {
+            world.set_block(
+                BlockPos::new(0, 65, z),
+                vanilla_blocks::WITHER_SKELETON_SKULL.default_state(),
+                UpdateFlags::UPDATE_ALL,
+            );
+        }
+
+        let withers = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(-2.0, 64.0, -2.0, 2.0, 70.0, 4.0),
+            |entity| entity.downcast_ref::<WitherBossEntity>().is_some(),
+        );
+        assert_eq!(withers.len(), 1, "exactly one wither should be summoned");
+        for z in 0..3 {
+            assert_eq!(
+                world.get_block_state(BlockPos::new(0, 65, z)).get_block(),
+                &vanilla_blocks::AIR,
+                "z-axis skull at z={z} must be consumed"
+            );
+        }
+    }
+
+    #[test]
+    fn age_survives_a_save_load_round_trip() {
+        let wither = Arc::new(WitherBossEntity::new(
+            &vanilla_entities::WITHER,
+            next_entity_id(),
+            DVec3::new(0.5, 65.0, 0.5),
+            Weak::new(),
+        ));
+        *wither.age.lock() = 300;
+
+        let mut nbt = NbtCompound::new();
+        wither.save_additional(&mut nbt);
+        assert_eq!(nbt.int("Age"), Some(300));
+
+        let mut bytes = Vec::new();
+        nbt.write(&mut bytes);
+        let parsed = read_borrowed_compound(&mut Cursor::new(&bytes[..]))
+            .expect("the wither nbt should parse");
+        let restored = Arc::new(WitherBossEntity::new(
+            &vanilla_entities::WITHER,
+            next_entity_id(),
+            DVec3::new(0.5, 65.0, 0.5),
+            Weak::new(),
+        ));
+        restored.load_additional((&parsed).into());
+        assert_eq!(*restored.age.lock(), 300);
     }
 
     #[test]

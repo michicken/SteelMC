@@ -273,4 +273,14 @@ impl DragonPhaseInstance for PlaceholderPhase {
     fn phase(&self) -> EnderDragonPhase {
         self.phase
     }
+
+    fn begin(&self, dragon: &EnderDragonEntity) {
+        // A phase that has not been ported yet falls straight back to circling
+        // instead of leaving the dragon coasting in place with no way out. The
+        // manager is re-entrant, so switching from inside `begin` is safe; the
+        // re-entrant switch test covers the lock ordering.
+        dragon
+            .phase_manager()
+            .set_phase(dragon, EnderDragonPhase::HoldingPattern);
+    }
 }

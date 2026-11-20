@@ -215,3 +215,17 @@ fn kill_removes_the_dragon_without_the_animation() {
     assert!(dragon.is_removed());
     assert_eq!(dragon.dragon_death_time(), 0);
 }
+
+#[test]
+fn kill_reports_the_fight_as_defeated() {
+    let world = death_test_world("dragon_kill_fight");
+    let dragon = dragon_at(&world, DVec3::new(0.5, 80.0, 0.5));
+
+    dragon.kill(&world);
+
+    assert!(dragon.is_removed());
+    assert!(
+        world.is_ender_dragon_killed(),
+        "a command kill must report the fight the same way the death animation does"
+    );
+}

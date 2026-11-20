@@ -59,16 +59,26 @@ pub struct CBossEvent {
 
 impl CBossEvent {
     /// Creates an `Add` packet.
+    ///
+    /// `overlay` is the vanilla notched-bar id (0 plain, 1–6 notched); `flags` is the
+    /// bitfield of darken-sky / dragon-bar / boss-music / world-fog display flags.
     #[must_use]
-    pub fn add(uuid: Uuid, name: impl Into<TextComponent>, progress: f32, color: i32) -> Self {
+    pub fn add(
+        uuid: Uuid,
+        name: impl Into<TextComponent>,
+        progress: f32,
+        color: i32,
+        overlay: i32,
+        flags: u8,
+    ) -> Self {
         Self {
             uuid,
             operation: BossEventOperation::Add,
             name: Some(name.into()),
             progress,
             color,
-            overlay: 0,
-            flags: 0,
+            overlay,
+            flags,
         }
     }
 
@@ -129,5 +139,35 @@ impl WriteTo for CBossEvent {
             BossEventOperation::UpdateProperties => self.flags.write(writer)?,
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_carries_color_overlay_and_flags() {
+        let uuid = Uuid::nil();
+        let packet = CBossEvent::add(uuid, "Dragon", 0.75, 4, 1, 0x2);
+
+        assert_eq!(packet.operation, BossEventOperation::Add);
+        assert_eq!(packet.color, 4);
+        assert_eq!(packet.overlay, 1);
+        assert_eq!(packet.flags, 0x2);
+        assert_eq!(packet.progress, 0.75);
+        assert!(packet.name.is_some());
+    }
+
+    #[test]
+    fn remove_zeroes_the_display_fields() {
+        let packet = CBossEvent::remove(Uuid::nil());
+
+        assert_eq!(packet.operation, BossEventOperation::Remove);
+        assert!(packet.name.is_none());
+        assert_eq!(packet.progress, 0.0);
+        assert_eq!(packet.color, 0);
+        assert_eq!(packet.overlay, 0);
+        assert_eq!(packet.flags, 0);
     }
 }

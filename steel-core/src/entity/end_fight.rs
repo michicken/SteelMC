@@ -10,19 +10,21 @@
 use std::sync::Arc;
 
 use glam::DVec3;
-use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+use serde::{Deserialize, Serialize};
 use steel_registry::{vanilla_blocks, vanilla_entities};
 use steel_utils::types::UpdateFlags;
-use steel_utils::{BlockPos, locks::SyncMutex};
+use steel_utils::{BlockPos, Downcast as _, geometry::WorldAabb, locks::SyncMutex};
+use uuid::Uuid;
 
 use crate::chunk::heightmap::HeightmapType;
 use crate::entity::entities::EnderDragonEntity;
-use crate::entity::entities::mobs::bosses::ender_dragon::end_podium_location;
-use crate::entity::{Entity, LivingEntity, SharedEntity, reserve_entity_ids};
+use crate::entity::entities::mobs::bosses::ender_dragon::{
+    EnderDragonPhase, end_podium_location,
+};
+use crate::entity::{RemovalReason, SharedEntity, reserve_entity_ids};
 use steel_protocol::packets::game::CBossEvent;
 use steel_utils::translations;
 use text_components::TextComponent;
-use uuid::Uuid;
 use crate::world::World;
 
 /// Persistent-enough state for one End level.
@@ -34,9 +36,47 @@ pub struct EndFightState {
     dragon_id: Option<i32>,
     dragon_uuid: Option<Uuid>,
     last_boss_progress: f32,
+    /// Transient marker: the state changed since it was last persisted.
+    dirty: bool,
+}
+
+/// TOML-serializable half of the fight state. The live entity id is not saved: it
+/// is reassigned on every load.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PersistedEndFight {
+    killed: bool,
+    spawned: bool,
+    dragon_uuid: Option<String>,
 }
 
 impl EndFightState {
+    /// Rebuilds the live state from its saved data.
+    #[must_use]
+    pub(crate) fn from_persisted(persisted: PersistedEndFight) -> Self {
+        Self {
+            killed: persisted.killed,
+            spawned: persisted.spawned,
+            dragon_uuid: persisted.dragon_uuid.and_then(|value| Uuid::parse_str(&value).ok()),
+            ..Self::default()
+        }
+    }
+
+    /// Converts the live state into the saved-data snapshot.
+    #[must_use]
+    pub(crate) fn to_persisted(&self) -> PersistedEndFight {
+        PersistedEndFight {
+            killed: self.killed,
+            spawned: self.spawned,
+            dragon_uuid: self.dragon_uuid.map(|uuid| uuid.to_string()),
+        }
+    }
+
+    /// Whether the live state has unsaved changes.
+    #[must_use]
+    pub const fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     /// Whether the dragon has already been defeated in this world.
     #[must_use]
     pub const fn is_killed(&self) -> bool {
@@ -54,42 +94,38 @@ impl EndFightState {
         if !self.initialized {
             self.initialized = true;
         }
-        // Vanilla creates the dragon once the arena chunks are available. The
-        // first End tick can run before the player's view has loaded chunk (0,0),
-        // so keep retrying until the spawn succeeds.
-        if !self.killed
-            && !self.spawned
-            && self.dragon_id.is_none()
-            && world
-                .chunk_map
-                .is_block_ticking_full_chunk_loaded(steel_utils::ChunkPos::new(0, 0))
-        {
-            self.spawn_dragon(world);
+
+        if self.killed {
+            // A leftover dragon (for example one that survived a restart) must not
+            // roam the arena after the fight was already won.
+            self.discard_leftover_dragons(world);
+            self.refresh_boss_progress(world);
+            return;
         }
 
-        // A dragon removed for any reason other than the fight's own kill (for
-        // example a `/kill`) leaves the arena empty, exactly as vanilla waits for
-        // the fight to be reset rather than silently spawning a replacement.
-        if let Some(id) = self.dragon_id {
-            match world.get_entity_by_id(id) {
-                Some(entity) => {
-                    let progress = entity
-                        .as_living_entity()
-                        .map_or(0.0, |living| {
-                            (living.get_health() / living.get_max_health().max(0.001)).clamp(0.0, 1.0)
-                        });
-                    if (progress - self.last_boss_progress).abs() > 0.01 {
-                        self.last_boss_progress = progress;
-                        if let Some(uuid) = self.dragon_uuid {
-                            world.broadcast_to_all(CBossEvent::update_progress(uuid, progress));
-                        }
-                    }
-                }
-                None => {
-                    self.dragon_id = None;
-                }
+        if !self.spawned {
+            // A dragon already present in the world (restart, or a leftover from a
+            // previous session) is taken over instead of spawning a second one.
+            if let Some(existing) = self.find_existing_dragon(world) {
+                let id = existing.id();
+                let uuid = existing.uuid();
+                self.spawned = true;
+                self.dragon_id = Some(id);
+                self.dragon_uuid = Some(uuid);
+                self.last_boss_progress = 1.0;
+                self.dirty = true;
+            } else if world
+                .chunk_map
+                .is_block_ticking_full_chunk_loaded(steel_utils::ChunkPos::new(0, 0))
+            {
+                // Vanilla creates the dragon once the arena chunks are available.
+                // The first End tick can run before the player's view has loaded
+                // chunk (0,0), so keep retrying until the spawn succeeds.
+                self.spawn_dragon(world);
             }
         }
+
+        self.refresh_boss_progress(world);
     }
 
     /// Marks the fight finished and builds the exit portal + egg.
@@ -98,6 +134,7 @@ impl EndFightState {
             return;
         }
         self.killed = true;
+        self.dirty = true;
         self.dragon_id = None;
         if let Some(uuid) = self.dragon_uuid.take() {
             world.broadcast_to_all(CBossEvent::remove(uuid));
@@ -121,14 +158,75 @@ impl EndFightState {
             self.dragon_id = Some(id);
             self.dragon_uuid = world.get_entity_by_id(id).map(|entity| entity.uuid());
             self.last_boss_progress = 1.0;
+            self.dirty = true;
+
+            // A freshly built dragon defaults to the hovering phase; the fight
+            // hands it off to the circling pattern once it is in the world.
+            if let Some(entity) = world.get_entity_by_id(id) {
+                if let Some(dragon) = entity.downcast_ref::<EnderDragonEntity>() {
+                    dragon
+                        .phase_manager()
+                        .set_phase(dragon, EnderDragonPhase::HoldingPattern);
+                }
+            }
+
             if let Some(uuid) = self.dragon_uuid {
+                // Vanilla dragon bar: purple (4) plain progress bar, no extra flags.
                 world.broadcast_to_all(CBossEvent::add(
                     uuid,
                     TextComponent::translated(translations::ENTITY_MINECRAFT_ENDER_DRAGON.msg()),
                     1.0,
+                    4,
+                    0,
                     0,
                 ));
             }
+        }
+    }
+
+    fn refresh_boss_progress(&mut self, world: &Arc<World>) {
+        // A dragon removed for any reason other than the fight's own kill (for
+        // example a `/kill`) leaves the arena empty, exactly as vanilla waits for
+        // the fight to be reset rather than silently spawning a replacement.
+        if let Some(id) = self.dragon_id {
+            match world.get_entity_by_id(id) {
+                Some(entity) => {
+                    let progress = entity
+                        .as_living_entity()
+                        .map_or(0.0, |living| {
+                            (living.get_health() / living.get_max_health().max(0.001))
+                                .clamp(0.0, 1.0)
+                        });
+                    if (progress - self.last_boss_progress).abs() > 0.01 {
+                        self.last_boss_progress = progress;
+                        if let Some(uuid) = self.dragon_uuid {
+                            world.broadcast_to_all(CBossEvent::update_progress(uuid, progress));
+                        }
+                    }
+                }
+                None => {
+                    self.dragon_id = None;
+                }
+            }
+        }
+    }
+
+    fn find_existing_dragon(&self, world: &Arc<World>) -> Option<SharedEntity> {
+        let area = WorldAabb::new(-300.0, -64.0, -300.0, 300.0, 200.0, 300.0);
+        world
+            .get_entities_in_aabb_matching(&area, |entity| {
+                entity.entity_type() == &vanilla_entities::ENDER_DRAGON
+            })
+            .into_iter()
+            .next()
+    }
+
+    fn discard_leftover_dragons(&self, world: &Arc<World>) {
+        let area = WorldAabb::new(-300.0, -64.0, -300.0, 300.0, 200.0, 300.0);
+        for entity in world.get_entities_in_aabb_matching(&area, |entity| {
+            entity.entity_type() == &vanilla_entities::ENDER_DRAGON
+        }) {
+            entity.set_removed(RemovalReason::Discarded);
         }
     }
 
@@ -141,7 +239,6 @@ impl EndFightState {
 
         let bedrock = vanilla_blocks::BEDROCK.default_state();
         let portal = vanilla_blocks::END_PORTAL.default_state();
-        let air = vanilla_blocks::AIR.default_state();
 
         for dx in -2..=2 {
             for dz in -2..=2 {
@@ -167,7 +264,22 @@ impl EndFightState {
             vanilla_blocks::DRAGON_EGG.default_state(),
             UpdateFlags::UPDATE_ALL,
         );
-        let _ = air;
+
+        self.spawn_end_gateways(world, podium, y);
+    }
+
+    /// Places End gateway blocks around the exit portal after the dragon dies.
+    ///
+    /// The gateway block entity currently has no public way to clear its stored
+    /// exit position, so these gateways are created with a placeholder exit and
+    /// `exact = false`; real outer-island targets are assigned by the existing
+    /// teleport transition on first use.
+    fn spawn_end_gateways(&self, world: &Arc<World>, podium: BlockPos, y: i32) {
+        let offsets: [(i32, i32); 4] = [(6, 0), (-6, 0), (0, 6), (0, -6)];
+        for (dx, dz) in offsets {
+            let origin = BlockPos::new(podium.x() + dx, y, podium.z() + dz);
+            let _ = world.create_end_gateway_portal(origin, origin, false);
+        }
     }
 }
 
@@ -181,14 +293,16 @@ mod tests {
     use steel_registry::blocks::block_state_ext::BlockStateExt as _;
     use steel_registry::{
         init_vanilla_registry, vanilla_blocks, vanilla_damage_types, vanilla_dimension_types,
+        vanilla_entities,
     };
     use steel_utils::{BlockPos, Downcast as _};
+    use uuid::Uuid;
 
     use crate::entity::damage::DamageSource;
     use crate::entity::entities::mobs::bosses::ender_dragon::EnderDragonPhase;
-    use crate::entity::{Entity, LivingEntity};
+    use crate::entity::{Entity, LivingEntity, reserve_entity_ids};
 
-    use super::EndFightState;
+    use super::{EndFightState, PersistedEndFight};
     use crate::test_support::{fresh_test_world_with_dimension_type, insert_ready_full_chunk};
 
     fn end_world(key: &'static str) -> Arc<crate::world::World> {
@@ -230,6 +344,23 @@ mod tests {
     }
 
     #[test]
+    fn spawned_dragon_enters_the_holding_pattern_phase() {
+        let world = end_world("holding_pattern");
+        let mut fight = EndFightState::default();
+        fight.tick(&world);
+
+        let id = fight.dragon_id().expect("dragon should be spawned");
+        let entity = world.get_entity_by_id(id).expect("dragon id should resolve");
+        let dragon = entity
+            .downcast_ref::<crate::entity::entities::EnderDragonEntity>()
+            .expect("entity should be the dragon");
+        assert_eq!(
+            dragon.phase_manager().current_phase(),
+            EnderDragonPhase::HoldingPattern
+        );
+    }
+
+    #[test]
     fn dragon_spawn_waits_for_the_arena_chunks_to_load() {
         init_vanilla_registry();
         crate::behavior::init_behaviors();
@@ -254,6 +385,57 @@ mod tests {
         assert!(
             fight.dragon_id().is_some(),
             "dragon must appear once the arena chunks are available"
+        );
+    }
+
+    #[test]
+    fn an_existing_dragon_is_taken_over_instead_of_duplicated() {
+        let world = end_world("takeover");
+        let ids = reserve_entity_ids(9);
+        let dragon = crate::entity::entities::EnderDragonEntity::new(
+            &vanilla_entities::ENDER_DRAGON,
+            ids.first(),
+            glam::DVec3::new(0.5, 128.0, 0.5),
+            Arc::downgrade(&world),
+        );
+        world
+            .try_add_entity(Arc::new(dragon))
+            .expect("leftover dragon should be added");
+
+        let mut fight = EndFightState::default();
+        fight.tick(&world);
+
+        let bound_id = fight.dragon_id().expect("existing dragon must be bound");
+        assert_eq!(bound_id, ids.first());
+
+        fight.tick(&world);
+        assert_eq!(fight.dragon_id(), Some(bound_id), "no second dragon may spawn");
+    }
+
+    #[test]
+    fn a_killed_fight_discards_any_leftover_dragon() {
+        let world = end_world("cleanup");
+        let ids = reserve_entity_ids(9);
+        let dragon = crate::entity::entities::EnderDragonEntity::new(
+            &vanilla_entities::ENDER_DRAGON,
+            ids.first(),
+            glam::DVec3::new(0.5, 128.0, 0.5),
+            Arc::downgrade(&world),
+        );
+        world
+            .try_add_entity(Arc::new(dragon))
+            .expect("leftover dragon should be added");
+
+        let mut fight = EndFightState::from_persisted(PersistedEndFight {
+            killed: true,
+            spawned: true,
+            dragon_uuid: None,
+        });
+        fight.tick(&world);
+
+        assert!(
+            world.get_entity_by_id(ids.first()).is_none(),
+            "leftover dragon must be discarded after the fight was won"
         );
     }
 
@@ -294,6 +476,23 @@ mod tests {
         assert!(after.dragon_id().is_none());
     }
 
+    #[test]
+    fn killed_fight_state_round_trips_through_saved_data() {
+        let uuid = Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid");
+        let original = EndFightState {
+            killed: true,
+            spawned: true,
+            dragon_uuid: Some(uuid),
+            ..EndFightState::default()
+        };
+
+        let persisted = original.to_persisted();
+        let restored = EndFightState::from_persisted(persisted);
+
+        assert!(restored.is_killed());
+        assert_eq!(restored.dragon_uuid, Some(uuid));
+        assert!(!restored.is_dirty(), "loaded state is not dirty until changed");
+    }
 
     #[test]
     fn a_real_dragon_death_marks_the_fight_and_builds_the_portal() {
@@ -306,8 +505,8 @@ mod tests {
             .downcast_ref::<crate::entity::entities::EnderDragonEntity>()
             .expect("dragon");
 
-        // A freshly built dragon starts in the hovering (sitting) phase; the fight
-        // tick moves it to holding-pattern flight. Test the airborne branch.
+        // A freshly built dragon is handed to the circling phase by the fight, so
+        // set the airborne death phase explicitly to drive the death flight.
         dragon
             .phase_manager()
             .set_phase(dragon, EnderDragonPhase::HoldingPattern);

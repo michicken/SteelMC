@@ -254,21 +254,18 @@ fn a_phase_can_switch_the_dragon_out_of_itself_without_deadlocking() {
 }
 
 #[test]
-fn unported_phases_leave_the_dragon_coasting_rather_than_failing() {
+fn unported_phases_fall_back_to_the_circling_pattern() {
     let dragon = test_dragon();
 
-    // Landing is a placeholder this pass. Reporting no fly target is what makes an
-    // unimplemented phase degrade to a stationary dragon instead of a panic.
+    // Landing is a placeholder this pass. Entering one must bounce straight back
+    // to the holding pattern so the dragon is not left coasting in place.
     dragon
         .phase_manager()
         .set_phase(&dragon, EnderDragonPhase::Landing);
 
-    assert!(
-        dragon
-            .phase_manager()
-            .current()
-            .fly_target_location()
-            .is_none()
+    assert_eq!(
+        dragon.phase_manager().current_phase(),
+        EnderDragonPhase::HoldingPattern
     );
 }
 

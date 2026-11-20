@@ -248,8 +248,8 @@ mod tests {
     /// that fight is not ported. Driving it directly is the only coverage available.
     ///
     /// The roll is random, so the assertion is on the invariant rather than an outcome:
-    /// a hand-off always lands on `LandingApproach`, and staying put always leaves the
-    /// phase alone.
+    /// a hand-off targets a placeholder this pass, and the placeholder bounces straight
+    /// back to the holding pattern; declining to hand off leaves the phase alone.
     #[test]
     fn a_hand_off_either_lands_or_leaves_the_phase_untouched() {
         let world = test_world();
@@ -262,8 +262,8 @@ mod tests {
                 handed_off += 1;
                 assert_eq!(
                     dragon.phase_manager().current_phase(),
-                    EnderDragonPhase::LandingApproach,
-                    "a hand-off must leave the dragon on the landing approach"
+                    EnderDragonPhase::HoldingPattern,
+                    "the landing-approach placeholder must fall back to circling"
                 );
             } else {
                 assert_eq!(

@@ -31,6 +31,8 @@ pub mod names {
     pub const COMMAND_STORAGE: SavedDataName = SavedDataName::trusted("command_storage");
     /// Named random sequences shared by a domain's worlds.
     pub const RANDOM_SEQUENCES: SavedDataName = SavedDataName::trusted("random_sequences");
+    /// End dragon fight lifecycle state (killed flag, spawned flag, dragon uuid).
+    pub const END_FIGHT: SavedDataName = SavedDataName::trusted("end_fight");
 }
 
 /// Name of a per-world saved data entry.

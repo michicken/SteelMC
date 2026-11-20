@@ -1094,10 +1094,14 @@ impl Entity for EnderDragonEntity {
     /// into the 200-tick death flight, so without this override `/kill` would take ten
     /// seconds to take effect.
     fn kill(&self, _world: &World) {
-        // TODO: Report to `EnderDragonFight::update_dragon` and `set_dragon_killed`
-        // once the fight exists.
         self.set_removed(RemovalReason::Killed);
         self.game_event(&vanilla_game_events::ENTITY_DIE);
+        // A command `/kill` still counts as the dragon being defeated: report to
+        // the fight so the boss bar is removed, the exit portal is built and the
+        // killed flag is set, matching the death-animation path.
+        if let Some(world) = self.level() {
+            world.on_ender_dragon_killed();
+        }
     }
 
     /// Mirrors vanilla `EnderDragon.sanitizeScale`, which pins the dragon to 1.0.

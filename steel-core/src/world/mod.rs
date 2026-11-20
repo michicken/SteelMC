@@ -419,6 +419,17 @@ impl World {
             level_data.save().await?;
         }
         let ticket_storage = ChunkTicketStorage::load(&saved_data, &key).await;
+        let end_fight_state = crate::entity::end_fight::EndFightState::from_persisted(
+            saved_data
+                .load_or_default::<crate::entity::end_fight::PersistedEndFight>(
+                    saved_data_names::END_FIGHT,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    log::warn!("Could not load End fight data for world {key}; starting fresh: {error}");
+                    crate::entity::end_fight::PersistedEndFight::default()
+                }),
+        );
         let world_border = WorldBorder::new(level_data.data().world_border)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         // let generator = Arc::new(ChunkGeneratorType::Flat(FlatChunkGenerator::new(
@@ -498,7 +509,7 @@ impl World {
                 poi_storage: SyncMutex::new(PointOfInterestStorage::new()),
                 pending_world_changes: SyncMutex::new(Vec::new()),
                 entity_parts: SyncMutex::new(FxHashMap::default()),
-                end_fight: SyncMutex::new(crate::entity::end_fight::EndFightState::default()),
+                end_fight: SyncMutex::new(end_fight_state),
             }
         }))
     }
@@ -523,6 +534,21 @@ impl World {
         {
             Ok(()) => log::info!("World {} saved chunk ticket data successfully", self.key),
             Err(e) => log::error!("Failed to save world chunk ticket data: {e}"),
+        }
+
+        let end_fight_snapshot = {
+            let fight = self.end_fight.lock();
+            fight.is_dirty().then(|| fight.to_persisted())
+        };
+        if let Some(snapshot) = end_fight_snapshot {
+            match self
+                .saved_data
+                .save(saved_data_names::END_FIGHT, &snapshot)
+                .await
+            {
+                Ok(()) => log::info!("World {} saved End fight data successfully", self.key),
+                Err(e) => log::error!("Failed to save world End fight data: {e}"),
+            }
         }
 
         match self.save_all_chunks().await {
