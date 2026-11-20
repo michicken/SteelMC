@@ -20,6 +20,8 @@ use steel_registry::game_rules::GameRuleValues;
 use steel_utils::types::Difficulty;
 use steel_utils::{BlockPos, GlobalPos, Identifier};
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 use crate::world::{MAX_SIZE, clock::WorldClockManager};
 
@@ -407,6 +409,14 @@ pub struct LevelDataManager {
     game_time: Arc<GameTime>,
 }
 
+/// Classification of a level-data load failure.
+enum LevelDataLoadError {
+    /// File content cannot be parsed/deserialized; safe to discard after backup.
+    Corrupt(io::Error),
+    /// Startup policy violation; must abort rather than fall back.
+    Hard(io::Error),
+}
+
 impl LevelDataManager {
     /// Creates a new level data manager for the given world directory.
     ///
@@ -424,41 +434,34 @@ impl LevelDataManager {
 
             let (data, dirty) = if path.exists() {
                 // Load existing level data (seed from file takes precedence)
-                let content = fs::read_to_string(&path).await?;
-                let mut table: toml::Table = toml::from_str(&content).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Invalid {}: {e}", path.display()),
-                    )
-                })?;
-                let removed_legacy_time = matches!(&source, GameTimeSource::Derived(_))
-                    && table.remove("game_time").is_some();
-                let mut loaded: LevelData = table.try_into().map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Invalid {}: {e}", path.display()),
-                    )
-                })?;
-                if matches!(&source, GameTimeSource::Primary) && loaded.game_time.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "Domain default world's {} is missing game_time. If you changed the domain default world, stop the server and copy game_time from the previous default world's level.toml into this file before restarting.",
+                match Self::read_existing_level_data_file(&path, &source).await {
+                    Ok((mut loaded, removed_legacy_time)) => {
+                        // Initialize runtime game rules from serialized values
+                        loaded.load_game_rules();
+                        let initialized_clocks = loaded
+                            .world_clocks
+                            .initialize_registered_clocks()
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                        let adopted_generation = loaded.validate_generation_settings(generation)?;
+                        (
+                            loaded,
+                            adopted_generation || initialized_clocks || removed_legacy_time,
+                        )
+                    }
+                    Err(LevelDataLoadError::Corrupt(error)) => {
+                        // Unreadable/truncated TOML: move the bad file aside and start
+                        // fresh instead of aborting world startup.
+                        Self::backup_corrupt_level_toml(&path).await;
+                        log::warn!(
+                            "Failed to load {} ({error}); moved it aside and starting with fresh level data.",
                             path.display()
-                        ),
-                    ));
+                        );
+                        let mut data = LevelData::new_with_seed_and_difficulty(seed, difficulty);
+                        data.generation = Some(generation);
+                        (data, true)
+                    }
+                    Err(LevelDataLoadError::Hard(error)) => return Err(error),
                 }
-                // Initialize runtime game rules from serialized values
-                loaded.load_game_rules();
-                let initialized_clocks = loaded
-                    .world_clocks
-                    .initialize_registered_clocks()
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                let adopted_generation = loaded.validate_generation_settings(generation)?;
-                (
-                    loaded,
-                    adopted_generation || initialized_clocks || removed_legacy_time,
-                )
             } else {
                 // Create new level data with the provided defaults.
                 let mut data = LevelData::new_with_seed_and_difficulty(seed, difficulty);
@@ -495,6 +498,63 @@ impl LevelDataManager {
             primary_game_time,
             game_time,
         })
+    }
+
+    /// Reads and parses an existing `level.toml`.
+    ///
+    /// Unreadable TOML syntax is reported as [`LevelDataLoadError::Corrupt`] so the
+    /// caller can back the bad file up and fall back; field-level type validation
+    /// failures and startup policy violations (missing authoritative `game_time`)
+    /// are reported as [`LevelDataLoadError::Hard`] and keep aborting startup.
+    async fn read_existing_level_data_file(
+        path: &Path,
+        source: &GameTimeSource,
+    ) -> Result<(LevelData, bool), LevelDataLoadError> {
+        let content = fs::read_to_string(path)
+            .await
+            .map_err(LevelDataLoadError::Hard)?;
+        let mut table: toml::Table = toml::from_str(&content).map_err(|e| {
+            LevelDataLoadError::Corrupt(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid {}: {e}", path.display()),
+            ))
+        })?;
+        let removed_legacy_time = matches!(source, GameTimeSource::Derived(_))
+            && table.remove("game_time").is_some();
+        // A well-formed TOML that fails field-level type validation keeps the
+        // previous hard-fail behavior; only syntactically unreadable files are
+        // backed up and replaced by a fresh fallback.
+        let loaded: LevelData = table.try_into().map_err(|e| {
+            LevelDataLoadError::Hard(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid {}: {e}", path.display()),
+            ))
+        })?;
+        if matches!(source, GameTimeSource::Primary) && loaded.game_time.is_none() {
+            return Err(LevelDataLoadError::Hard(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Domain default world's {} is missing game_time. If you changed the domain default world, stop the server and copy game_time from the previous default world's level.toml into this file before restarting.",
+                    path.display()
+                ),
+            )));
+        }
+        Ok((loaded, removed_legacy_time))
+    }
+
+    /// Renames a corrupt `level.toml` aside as `level.toml.corrupt-<uuid>` so the
+    /// fresh fallback can take its place without losing the diagnostic file.
+    async fn backup_corrupt_level_toml(path: &Path) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let backup_path = parent.join(format!("level.toml.corrupt-{}", Uuid::new_v4()));
+        if let Err(error) = fs::rename(path, &backup_path).await {
+            log::warn!(
+                "Failed to back up corrupt level.toml at {}: {error}",
+                path.display()
+            );
+        }
     }
 
     /// Loads the saved world seed from `level.toml`, or returns the provided default.
@@ -565,7 +625,34 @@ impl LevelDataManager {
 
         let content = toml::to_string_pretty(&self.data)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        fs::write(world_path, content).await?;
+
+        // Atomic commit: write to a fresh temporary file, sync it, then rename over
+        // the target. A crash mid-write leaves the previous level.toml intact instead
+        // of a truncated half-written file.
+        let temp_path = world_path.with_extension(format!("toml.{}.tmp", Uuid::new_v4()));
+        let mut file = fs::File::create_new(&temp_path).await?;
+        let write_result: io::Result<()> = async {
+            file.write_all(content.as_bytes()).await?;
+            file.sync_all().await?;
+            drop(file);
+            fs::rename(&temp_path, world_path).await?;
+            if cfg!(unix)
+                && let Some(parent) = world_path.parent()
+            {
+                fs::File::open(parent).await?.sync_all().await?;
+            }
+            Ok(())
+        }
+        .await;
+        if write_result.is_err()
+            && let Err(remove_error) = fs::remove_file(&temp_path).await
+            && remove_error.kind() != io::ErrorKind::NotFound
+        {
+            log::warn!(
+                "Failed to remove uncommitted level-data temporary file: {remove_error}"
+            );
+        }
+        write_result?;
         self.dirty = false;
 
         log::debug!("Saved level data to {}", world_path.display());
@@ -870,6 +957,107 @@ mod tests {
             panic!("overworld clock update should exist");
         };
         assert_eq!(update.3, 3.5);
+    }
+
+    #[tokio::test]
+    async fn level_data_save_is_atomic_and_leaves_no_temp_file() {
+        init_vanilla_registry();
+        let dir = temp_level_data_dir("atomic-save");
+        let generation = settings(
+            "minecraft:overworld",
+            OverworldNoiseSettings::HEIGHT,
+        );
+
+        let mut manager = LevelDataManager::new(
+            Some(dir.as_path()),
+            99,
+            Difficulty::Normal,
+            generation.clone(),
+            GameTimeSource::Primary,
+        )
+        .await
+        .expect("fresh manager should start");
+        manager
+            .data_mut()
+            .set_spawn_pos(BlockPos::new(3, 70, -5));
+        manager.save().await.expect("save level data");
+
+        let entries: Vec<String> = std_fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.iter().all(|name| !name.ends_with(".tmp")),
+            "no uncommitted temporary file should remain: {entries:?}"
+        );
+
+        let reloaded = LevelDataManager::new(
+            Some(dir.as_path()),
+            1,
+            Difficulty::Normal,
+            generation,
+            GameTimeSource::Primary,
+        )
+        .await
+        .expect("saved level data should reload");
+        assert_eq!(reloaded.data().seed, 99);
+        assert_eq!(reloaded.data().spawn_pos(), BlockPos::new(3, 70, -5));
+
+        let _ = std_fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn corrupt_level_toml_is_backed_up_and_falls_back_to_default() {
+        init_vanilla_registry();
+        let dir = temp_level_data_dir("corrupt-toml");
+        std_fs::write(dir.join("level.toml"), "seed = = = [[[\nnot valid toml\n")
+            .expect("corrupt fixture should be written");
+        let generation = settings(
+            "minecraft:overworld",
+            OverworldNoiseSettings::HEIGHT,
+        );
+
+        let mut manager = LevelDataManager::new(
+            Some(dir.as_path()),
+            7,
+            Difficulty::Normal,
+            generation.clone(),
+            GameTimeSource::Primary,
+        )
+        .await
+        .expect("corrupt level.toml must fall back instead of aborting startup");
+
+        let entries: Vec<String> = std_fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let backup = entries
+            .iter()
+            .find(|name| name.starts_with("level.toml.corrupt-"));
+        assert!(
+            backup.is_some(),
+            "corrupt file should be renamed aside: {entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|name| name == "level.toml"),
+            "corrupt original should no longer be in place: {entries:?}"
+        );
+
+        manager.save().await.expect("save fallback level data");
+        let reloaded = LevelDataManager::new(
+            Some(dir.as_path()),
+            1,
+            Difficulty::Normal,
+            generation,
+            GameTimeSource::Primary,
+        )
+        .await
+        .expect("fallback level data should reload");
+        assert_eq!(reloaded.data().seed, 7);
+
+        let _ = std_fs::remove_dir_all(&dir);
     }
 
     #[test]
