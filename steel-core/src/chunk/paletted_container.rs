@@ -14,6 +14,9 @@ use steel_registry::{REGISTRY, RegistryExt as _};
 use steel_utils::{BlockStateId, codec::VarInt, mth::ceil_log2, serial::WriteTo};
 
 mod encode;
+mod words;
+
+use words::PackedWords;
 
 /// A trait for converting a value to a global ID.
 pub trait ToGlobalId {
@@ -47,7 +50,7 @@ struct PackedIndices {
     values_per_word: u8,
     /// Reciprocal for `index / values_per_word`; every hot path avoids `div`.
     word_mul: u32,
-    data: Box<[u64]>,
+    data: PackedWords,
 }
 
 impl PackedIndices {
@@ -59,7 +62,7 @@ impl PackedIndices {
             bits,
             values_per_word: values_per_word as u8,
             word_mul: ((1_u64 << 32) / values_per_word as u64 + 1) as u32,
-            data: vec![0; volume.div_ceil(values_per_word)].into_boxed_slice(),
+            data: PackedWords::Dense(vec![0; volume.div_ceil(values_per_word)].into_boxed_slice()),
         }
     }
 
@@ -75,7 +78,7 @@ impl PackedIndices {
         debug_assert!(index < volume);
         let bits = usize::from(self.bits);
         let (word_index, offset) = self.word_index(index);
-        let word = self.data[word_index];
+        let word = self.data.get(word_index);
         let shift = offset * bits;
         ((word >> shift) & ((1u64 << bits) - 1)) as u32
     }
@@ -93,10 +96,13 @@ impl PackedIndices {
         let bits = usize::from(self.bits);
         let values_per_word = usize::from(self.values_per_word);
         let unit_mask = (1_u64 << bits) - 1;
+        let word_mul = self.word_mul;
+        let data = self.data.dense_mut();
         let mut index = start;
         let end = start + len;
         while index < end {
-            let (word_index, offset) = self.word_index(index);
+            let word_index = ((u64::from(word_mul) * index as u64) >> 32) as usize;
+            let offset = index - word_index * values_per_word;
             let take = (values_per_word - offset).min(end - index);
             let total_bits = take * bits;
             let low_mask = if total_bits == 64 {
@@ -114,7 +120,7 @@ impl PackedIndices {
             };
             let shift = offset * bits;
             let mask = low_mask << shift;
-            let word = &mut self.data[word_index];
+            let word = &mut data[word_index];
             *word = (*word & !mask) | ((u64::from(value).wrapping_mul(repeat) << shift) & mask);
             index += take;
         }
@@ -127,7 +133,7 @@ impl PackedIndices {
         let (word_index, offset) = self.word_index(index);
         let shift = offset * bits;
         let mask = ((1u64 << bits) - 1) << shift;
-        let word = &mut self.data[word_index];
+        let word = &mut self.data.dense_mut()[word_index];
         *word = (*word & !mask) | (u64::from(value) << shift);
     }
 
@@ -145,7 +151,7 @@ impl PackedIndices {
         let target = u64::from(from) * lows;
         let delta = u64::from(from ^ to);
 
-        for word in &mut self.data {
+        for word in self.data.dense_mut() {
             // In each entry, adding lower_bits sets its high bit if any lower
             // bit differs. The addition cannot carry into the next entry.
             let differences = *word ^ target;
@@ -157,7 +163,8 @@ impl PackedIndices {
 
     fn iter(&self, volume: usize) -> PackedIndicesIter<'_> {
         PackedIndicesIter {
-            words: self.data.iter(),
+            words: &self.data,
+            next_word: 0,
             bits: self.bits,
             values_per_word: self.values_per_word,
             mask: (1_u64 << self.bits) - 1,
@@ -167,36 +174,25 @@ impl PackedIndices {
         }
     }
 
+    fn words(&self, volume: usize) -> impl ExactSizeIterator<Item = u64> + '_ {
+        (0..volume.div_ceil(usize::from(self.values_per_word))).map(|index| self.data.get(index))
+    }
+
     /// Rewrites the entries at a wider or narrower width.
     fn repack(&mut self, new_bits: u8, volume: usize) {
         if self.bits == new_bits {
             return;
         }
-        let old_bits = self.bits;
-        let old_values_per_word = self.values_per_word;
-        let old_mul = self.word_mul;
-        let old = mem::replace(&mut self.data, PackedIndices::new(new_bits, volume).data);
-        self.bits = new_bits;
-        let new_values_per_word = 64 / usize::from(new_bits);
-        self.values_per_word = new_values_per_word as u8;
-        self.word_mul = ((1_u64 << 32) / new_values_per_word as u64 + 1) as u32;
-        for index in 0..volume {
-            let value = decode_word(&old, old_bits, old_values_per_word, old_mul, index);
+        let old = mem::replace(self, Self::new(new_bits, volume));
+        for (index, value) in old.iter(volume).enumerate() {
             self.set(index, value, volume);
         }
     }
 }
 
-fn decode_word(words: &[u64], bits: u8, values_per_word: u8, word_mul: u32, index: usize) -> u32 {
-    let bits = usize::from(bits);
-    let word = ((u64::from(word_mul) * index as u64) >> 32) as usize;
-    let offset = index - word * usize::from(values_per_word);
-    let shift = offset * bits;
-    ((words[word] >> shift) & ((1u64 << bits) - 1)) as u32
-}
-
 struct PackedIndicesIter<'a> {
-    words: slice::Iter<'a, u64>,
+    words: &'a PackedWords,
+    next_word: usize,
     bits: u8,
     values_per_word: u8,
     mask: u64,
@@ -214,7 +210,8 @@ impl Iterator for PackedIndicesIter<'_> {
             return None;
         }
         if self.entries_in_word == 0 {
-            self.word = *self.words.next()?;
+            self.word = self.words.get(self.next_word);
+            self.next_word += 1;
             self.entries_in_word = self.values_per_word;
         }
 
@@ -272,6 +269,14 @@ impl<V: Hash + Eq + Copy, const DIM: usize> HeterogeneousPalette<V, DIM> {
     /// Packed palette indices in y, z, x order.
     pub(crate) fn iter_indices(&self) -> impl ExactSizeIterator<Item = u32> + '_ {
         self.indices.iter(Self::VOLUME)
+    }
+
+    /// Returns existing packed words when the persistent layout matches.
+    pub(crate) fn words_for_bits(
+        &self,
+        bits: u8,
+    ) -> Option<impl ExactSizeIterator<Item = u64> + '_> {
+        (self.indices.bits == bits).then(|| self.indices.words(Self::VOLUME))
     }
 
     /// All values in y, z, x order.
@@ -344,6 +349,7 @@ impl<V: Hash + Eq + Copy, const DIM: usize> HeterogeneousPalette<V, DIM> {
             indices.fill(start as usize, usize::from(len), palette_index, total);
         }
 
+        indices.data.compact();
         (first, Some(Self { palette, indices }))
     }
 
@@ -410,8 +416,8 @@ impl<V: Hash + Eq + Copy, const DIM: usize> HeterogeneousPalette<V, DIM> {
 pub enum PalettedContainer<V: Hash + Eq + Copy + Default, const DIM: usize> {
     /// A homogeneous container, where all values are the same.
     Homogeneous(V),
-    /// A heterogeneous container, where values can be different.
-    Heterogeneous(HeterogeneousPalette<V, DIM>),
+    /// An allocation for mixed values, keeping homogeneous sections small.
+    Heterogeneous(Box<HeterogeneousPalette<V, DIM>>),
     /// Write-only build mode: raw cube without palette tracking.
     /// `set` is a single store; `get` is a direct read.
     /// Convert back via [`Self::finalize_building`].
@@ -441,7 +447,10 @@ impl<V: Hash + Eq + Copy + Default + Debug, const DIM: usize> PalettedContainer<
     #[must_use]
     pub fn from_cube(cube: Box<Cube<V, DIM>>) -> Self {
         let (single, heterogeneous) = HeterogeneousPalette::<V, DIM>::from_cube(&cube);
-        heterogeneous.map_or(Self::Homogeneous(single), Self::Heterogeneous)
+        heterogeneous.map_or_else(
+            || Self::Homogeneous(single),
+            |palette| Self::Heterogeneous(Box::new(palette)),
+        )
     }
 
     /// Gets the value at the given coordinates.
@@ -534,8 +543,7 @@ impl<V: Hash + Eq + Copy + Default + Debug, const DIM: usize> PalettedContainer<
     /// Switches the container into write-only build mode for fast bulk writes.
     /// Idempotent: a no-op if already in [`Self::Building`].
     ///
-    /// Allocates a `Cube` if currently `Homogeneous`. For `Heterogeneous` it
-    /// reuses the existing cube allocation.
+    /// Allocates and fills a `Cube` from the current paletted contents.
     pub fn enter_building_mode(&mut self) {
         match self {
             Self::Building(_) => {}
@@ -678,6 +686,14 @@ impl<V: Hash + Eq + Copy + Default + Debug, const DIM: usize> PalettedContainer<
                         data.indices.iter(Self::VOLUME),
                         &mut buffer,
                     )?,
+                    PaletteMode::Linear | PaletteMode::Hash if data.indices.bits == bits => {
+                        encode::write_local_words(
+                            data.indices.words(Self::VOLUME),
+                            data.palette.len(),
+                            bits,
+                            &mut buffer,
+                        )?
+                    }
                     PaletteMode::Linear | PaletteMode::Hash => encode::pack_local_indices(
                         Self::VOLUME,
                         data.palette.len(),
@@ -824,7 +840,7 @@ mod tests {
     use std::io::{Cursor, ErrorKind};
 
     use super::{
-        BiomePalette, BlockPalette, PackedIndices, ToGlobalId, biome_global_bits,
+        BiomePalette, BlockPalette, PackedIndices, PackedWords, ToGlobalId, biome_global_bits,
         block_state_global_bits,
     };
     use steel_registry::init_vanilla_registry;
@@ -864,6 +880,35 @@ mod tests {
                 assert_eq!(storage.get(index, VOLUME), value);
             }
         }
+    }
+
+    #[test]
+    fn packed_vertical_end_runs_round_trip_and_allow_mutations() {
+        const VOLUME: usize = BlockPalette::VOLUME;
+        let mut indices = PackedIndices::new(5, VOLUME);
+        let mut expected = vec![0; VOLUME];
+        for (index, entry) in expected.iter_mut().enumerate() {
+            *entry = match index {
+                ..1300 => 3,
+                1300..2700 => (index % 23) as u32,
+                _ => 2,
+            };
+            indices.set(index, *entry, VOLUME);
+        }
+
+        indices.data.compact();
+        assert!(matches!(indices.data, PackedWords::Trimmed(_)));
+        assert!(indices.iter(VOLUME).eq(expected.iter().copied()));
+        for (index, &value) in expected.iter().enumerate() {
+            assert_eq!(indices.get(index, VOLUME), value);
+        }
+
+        indices.set(0, 6, VOLUME);
+        indices.set(VOLUME - 1, 8, VOLUME);
+        indices.repack(7, VOLUME);
+        expected[0] = 6;
+        expected[VOLUME - 1] = 8;
+        assert!(indices.iter(VOLUME).eq(expected));
     }
 
     #[test]

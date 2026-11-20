@@ -282,7 +282,10 @@ impl ChunkStorage {
                 // inverting the palette once instead of scanning it per block.
                 let bits = bits_for_palette_len(palette.len())
                     .expect("Heterogeneous section should have palette length >= 2");
-                let block_data = pack_indices_from_iter(data.iter_indices(), bits);
+                let block_data = data.words_for_bits(bits).map_or_else(
+                    || pack_indices_from_iter(data.iter_indices(), bits),
+                    Iterator::collect,
+                );
 
                 PersistentSection::Heterogeneous {
                     palette,
@@ -321,7 +324,10 @@ impl ChunkStorage {
 
                 let bits = bits_for_palette_len(palette.len())
                     .expect("Heterogeneous biome data should have palette length >= 2");
-                let biome_data = pack_indices_from_iter(data.iter_indices(), bits);
+                let biome_data = data.words_for_bits(bits).map_or_else(
+                    || pack_indices_from_iter(data.iter_indices(), bits),
+                    Iterator::collect,
+                );
 
                 PersistentBiomeData::Heterogeneous {
                     palette,
@@ -362,12 +368,38 @@ impl ChunkStorage {
         // constructing a Chunk. Full construction populates world POI state, so
         // a late validation failure would otherwise leak partial loaded state.
         Self::validate_persistent_chunk(persistent, min_y, height)?;
-        let sections: Vec<ChunkSection> = persistent
-            .sections
-            .iter()
-            .map(|section| Self::persistent_to_section(section, persistent))
-            .collect::<io::Result<_>>()?;
-        let sections = Sections::from_owned(sections.into_boxed_slice());
+        let empty = if status < ChunkStatus::Biomes {
+            persistent
+                .sections
+                .iter()
+                .try_fold(true, |empty, section| {
+                    let PersistentSection::Homogeneous {
+                        block_state,
+                        biomes: PersistentBiomeData::Homogeneous { biome },
+                    } = section
+                    else {
+                        return Ok::<bool, io::Error>(false);
+                    };
+                    Ok(empty
+                        && Self::resolve_block_state(persistent, *block_state)? == BlockStateId(0)
+                        && Self::resolve_biome(persistent, *biome)?
+                            == steel_registry::RegistryEntry::id(
+                                &*steel_registry::vanilla_biomes::PLAINS,
+                            ) as u16)
+                })?
+        } else {
+            false
+        };
+        let sections = if empty {
+            Sections::deferred(persistent.sections.len())
+        } else {
+            let sections: Vec<ChunkSection> = persistent
+                .sections
+                .iter()
+                .map(|section| Self::persistent_to_section(section, persistent))
+                .collect::<io::Result<_>>()?;
+            Sections::from_owned(sections.into_boxed_slice())
+        };
 
         // Reconstruct structure data
         let structure_starts = Self::persistent_to_structure_starts(&persistent.structure_starts);
@@ -380,7 +412,7 @@ impl ChunkStorage {
             status.heightmaps_after(),
             min_y,
             height,
-            &sections.sections,
+            sections.materialized().unwrap_or_default(),
         );
 
         if status == ChunkStatus::Full {

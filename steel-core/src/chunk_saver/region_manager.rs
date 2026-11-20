@@ -326,10 +326,6 @@ impl RegionManager {
     }
 
     /// Saves prepared chunk data to disk after the snapshot-preparation phase has ended.
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "panic on `just inserted` is unreachable"
-    )]
     pub async fn save_chunk_data(
         &self,
         prepared: PreparedChunkSave,
@@ -337,13 +333,10 @@ impl RegionManager {
     ) -> io::Result<bool> {
         let pos = prepared.pos;
         let status = prepared.status;
-        let region_pos = RegionPos::from_chunk(pos.0.x, pos.0.y);
-        let (local_x, local_z) = RegionPos::local_chunk_pos(pos.0.x, pos.0.y);
-        let index = RegionHeader::chunk_index(local_x, local_z);
 
         let (sender, receiver) = oneshot::channel();
         thread_pool.spawn(move || {
-            let result = Self::encode_chunk(prepared);
+            let result = Self::encode_chunk(&prepared.persistent);
             if sender.send(result).is_err() {
                 tracing::trace!(
                     chunk = ?pos,
@@ -354,6 +347,19 @@ impl RegionManager {
         let compressed = receiver.await.map_err(|_| {
             io::Error::other("chunk encode task ended without returning a result")
         })??;
+
+        self.write_encoded_chunk(pos, status, &compressed).await
+    }
+
+    pub(crate) async fn write_encoded_chunk(
+        &self,
+        pos: ChunkPos,
+        status: ChunkStatus,
+        compressed: &[u8],
+    ) -> io::Result<bool> {
+        let region_pos = RegionPos::from_chunk(pos.0.x, pos.0.y);
+        let (local_x, local_z) = RegionPos::local_chunk_pos(pos.0.x, pos.0.y);
+        let index = RegionHeader::chunk_index(local_x, local_z);
 
         let mut regions = self.regions.write().await;
 
@@ -386,7 +392,7 @@ impl RegionManager {
         Self::write_chunk_data(
             &mut handle.file,
             sector_offset,
-            &compressed,
+            compressed,
             &mut handle.file_sectors,
         )
         .await?;
@@ -407,8 +413,8 @@ impl RegionManager {
         Ok(true)
     }
 
-    fn encode_chunk(prepared: PreparedChunkSave) -> io::Result<Vec<u8>> {
-        let data = wincode::serialize(&prepared.persistent)
+    pub(crate) fn encode_chunk(persistent: &PersistentChunk<'_>) -> io::Result<Vec<u8>> {
+        let data = wincode::serialize(persistent)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let compressed = zstd::encode_all(&data[..], 3)?;
 

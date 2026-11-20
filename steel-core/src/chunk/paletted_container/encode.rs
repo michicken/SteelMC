@@ -85,6 +85,50 @@ fn pack_longs<'buffer, V: Copy, const BITS: usize>(
     Ok(packed)
 }
 
+/// Writes already packed words when the wire and runtime widths match.
+pub(super) fn write_local_words<'buffer>(
+    words: impl ExactSizeIterator<Item = u64>,
+    palette_len: usize,
+    bits: u8,
+    buffer: &'buffer mut [u8; MAX_PACKED_BYTES],
+) -> Result<&'buffer [u8]> {
+    let word_size = size_of::<u64>();
+    let bytes = buffer
+        .get_mut(..words.len() * word_size)
+        .ok_or_else(|| invalid_data("container is too large to pack"))?;
+    let output = bytes.as_chunks_mut::<{ size_of::<u64>() }>().0;
+    let field_mask = (1_u64 << bits) - 1;
+    if palette_len as u64 > field_mask {
+        for (word, dest) in words.zip(output) {
+            *dest = word.to_be_bytes();
+        }
+        return Ok(bytes);
+    }
+
+    let used_bits = u64::BITS / u32::from(bits) * u32::from(bits);
+    let low_bits = (u64::MAX >> (u64::BITS - used_bits)) / field_mask;
+    let high_bit = 1_u64 << (bits - 1);
+    let high_bits = low_bits * high_bit;
+    let threshold = (palette_len as u64 & (high_bit - 1)) * low_bits;
+    for (word, dest) in words.zip(output) {
+        // A guard bit prevents borrowing between entries. Its sign indicates
+        // if that entry's lower bits are at or above the threshold's lower bits.
+        let remainder = ((word & !high_bits) | high_bits) - threshold;
+        let rejected = if (palette_len as u64) < high_bit {
+            word | remainder
+        } else {
+            word & remainder
+        };
+        if rejected & high_bits != 0 {
+            return Err(invalid_data(
+                "container holds a value its palette cannot encode",
+            ));
+        }
+        *dest = word.to_be_bytes();
+    }
+    Ok(bytes)
+}
+
 /// Packs raw palette indices, rejecting an index at or past `palette_len`.
 pub(super) fn pack_local_indices<'buffer>(
     count: usize,
@@ -190,7 +234,49 @@ fn invalid_data(message: &'static str) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PACKED_BYTES, pack_global_ids};
+    use super::{MAX_PACKED_BYTES, pack_global_ids, pack_local_indices, write_local_words};
+
+    #[test]
+    fn direct_word_encoding_agrees_with_the_per_index_encoder() {
+        for bits in 1..=8 {
+            let values_per_word = 64 / bits;
+            for palette_len in 2..=1_usize << bits {
+                let mut entries: Vec<_> = (0..values_per_word * 2 - 1)
+                    .map(|slot| (slot % palette_len) as u32)
+                    .collect();
+                for entry in [0, (1_u32 << bits) - 1] {
+                    entries[values_per_word - 1] = entry;
+                    let words: Vec<_> = entries
+                        .chunks(values_per_word)
+                        .map(|chunk| {
+                            chunk
+                                .iter()
+                                .enumerate()
+                                .fold(0, |word, (i, value)| word | u64::from(*value) << (i * bits))
+                        })
+                        .collect();
+                    let mut direct = [0; MAX_PACKED_BYTES];
+                    let mut unpacked = [0; MAX_PACKED_BYTES];
+                    let actual =
+                        write_local_words(words.into_iter(), palette_len, bits as u8, &mut direct);
+                    let expected = pack_local_indices(
+                        entries.len(),
+                        palette_len,
+                        bits as u8,
+                        entries.iter().copied(),
+                        &mut unpacked,
+                    );
+                    match (actual, expected) {
+                        (Ok(actual), Ok(expected)) => assert_eq!(actual, expected),
+                        (Err(actual), Err(expected)) => assert_eq!(actual.kind(), expected.kind()),
+                        _ => panic!(
+                            "encoders disagreed for width {bits}, palette {palette_len}, entry {entry}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
 
     /// Packs values at every width from 1 to 16 bits, including 9 to 15, which no section
     /// uses with vanilla's registries, and reads them back the way vanilla's

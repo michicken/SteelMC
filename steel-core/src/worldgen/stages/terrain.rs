@@ -40,7 +40,7 @@ pub(crate) fn generate(
         let local_quart_z = (quart_pos.z - neighbor_chunk_z * 4) as usize;
         let local_quart_y = (quart_pos.y - min_quart_y).clamp(0, quart_height - 1) as usize;
         let section_index = local_quart_y / 4;
-        sections.sections[section_index].read().biomes.get(
+        sections.holders()[section_index].read().biomes.get(
             local_quart_x,
             local_quart_y % 4,
             local_quart_z,

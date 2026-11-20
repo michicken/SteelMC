@@ -366,7 +366,7 @@ impl Chunk {
             heightmap_types,
             self.min_y,
             self.height,
-            &self.sections.sections,
+            self.sections.holders(),
         );
     }
 
@@ -644,7 +644,7 @@ impl Chunk {
 
     /// Fills the vanilla skylight-source cache from current section contents.
     pub fn initialize_light_sources(&self) {
-        for section in &self.sections.sections {
+        for section in self.sections.holders() {
             section.write().recalculate_counts();
         }
         self.refresh_light_emptiness_maps();
@@ -935,7 +935,7 @@ impl Chunk {
         let local_z = (pos.0.z & 15) as usize;
 
         let section_index = self.get_section_index(y);
-        let section = &self.sections.sections[section_index];
+        let section = &self.sections.holders()[section_index];
         let (old_state, empty_section_changed_to) = {
             let mut section_guard = section.write();
             if status >= ChunkStatus::InitializeLight {
@@ -1069,14 +1069,14 @@ impl Chunk {
         let get_block = |lx: usize, scan_y: i32, lz: usize| {
             let scan_section_index = ((scan_y - min_y) / 16) as usize;
             let scan_local_y = ((scan_y - min_y) % 16) as usize;
-            sections.sections[scan_section_index]
+            sections.holders()[scan_section_index]
                 .read()
                 .states()
                 .get(lx, scan_local_y, lz)
         };
 
         let mut heightmaps = self.heightmaps.write();
-        heightmaps.prime_from_sections(heightmap_types, min_y, height, &sections.sections);
+        heightmaps.prime_from_sections(heightmap_types, min_y, height, sections.holders());
 
         for &hm_type in heightmap_types {
             let Some(heightmap) = heightmaps.get_mut(hm_type) else {
@@ -1104,14 +1104,14 @@ impl Chunk {
         let get_block = |lx: usize, scan_y: i32, lz: usize| {
             let scan_section_index = ((scan_y - min_y) / 16) as usize;
             let scan_local_y = ((scan_y - min_y) % 16) as usize;
-            sections.sections[scan_section_index]
+            sections.holders()[scan_section_index]
                 .read()
                 .states()
                 .get(lx, scan_local_y, lz)
         };
 
         let mut heightmaps = self.heightmaps.write();
-        heightmaps.prime_from_sections(heightmap_types, min_y, height, &sections.sections);
+        heightmaps.prime_from_sections(heightmap_types, min_y, height, sections.holders());
 
         for &(relative_y, state) in relative_writes {
             let y = min_y + relative_y as i32;
@@ -1136,7 +1136,7 @@ impl Chunk {
         }
 
         let section_index = self.get_section_index(y);
-        let section = &self.sections.sections[section_index];
+        let section = &self.sections.holders()[section_index];
         let section_guard = section.read();
 
         let local_x = (pos.0.x & 15) as usize;
@@ -1152,7 +1152,7 @@ impl Chunk {
             return f(REGISTRY.blocks.get_default_state_id(&vanilla_blocks::AIR));
         }
 
-        let section = self.sections.sections[self.get_section_index(y)].read();
+        let section = self.sections.holders()[self.get_section_index(y)].read();
         let state = section.states().get(
             (pos.x() & 15) as usize,
             (y & 15) as usize,
@@ -1365,7 +1365,10 @@ mod tests {
         proto
             .sections
             .set_relative_block_for_generation(3, 4, 5, stone);
-        assert_eq!(proto.sections.sections[0].read().non_empty_block_count(), 0);
+        assert_eq!(
+            proto.sections.holders()[0].read().non_empty_block_count(),
+            0
+        );
 
         assert_eq!(
             proto.set_block_state_for_generation(
@@ -1387,10 +1390,16 @@ mod tests {
             ),
             Some(air)
         );
-        assert_eq!(proto.sections.sections[0].read().non_empty_block_count(), 0);
+        assert_eq!(
+            proto.sections.holders()[0].read().non_empty_block_count(),
+            0
+        );
 
         proto.initialize_light_sources();
-        assert_eq!(proto.sections.sections[0].read().non_empty_block_count(), 1);
+        assert_eq!(
+            proto.sections.holders()[0].read().non_empty_block_count(),
+            1
+        );
     }
 
     #[test]

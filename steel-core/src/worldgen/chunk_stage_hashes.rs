@@ -302,7 +302,7 @@ fn build_feature_holders(
 fn compute_block_hash(sections: &Sections) -> String {
     let mut ctx = md5::Context::new();
 
-    for section_holder in &sections.sections {
+    for section_holder in sections.holders() {
         let section = section_holder.read();
         // Match vanilla's `LevelChunkSection.hasOnlyAir()` — which returns
         // true when `nonEmptyBlockCount == 0`, i.e. every block is air /
@@ -546,7 +546,7 @@ struct BlockDiff {
 fn diff_chunk(sections: &Sections, reference: &ChunkBlockData, min_y: i32) -> Vec<BlockDiff> {
     let mut diffs = Vec::new();
 
-    for (si, section_holder) in sections.sections.iter().enumerate() {
+    for (si, section_holder) in sections.holders().iter().enumerate() {
         let section = section_holder.read();
         let ref_section = reference.sections.get(si);
         let section_base_y = min_y + (si as i32) * 16;
@@ -742,11 +742,11 @@ fn diff_light_layer(
     layer_name: &str,
     min_section: i32,
     reference: &[ReferenceLightSection],
-    actual: &[LightSection],
+    actual: &crate::chunk::light::ChunkLightLayerStorage,
 ) {
     for (section_index, reference_section) in reference.iter().enumerate() {
         let section_y = min_section + section_index as i32;
-        let Some(actual_section) = actual.get(section_index) else {
+        let Some(actual_section) = actual.section_at_index(section_index) else {
             push_light_diff(
                 diffs,
                 format!(
@@ -849,14 +849,14 @@ fn diff_light_chunk(chunk: &Chunk, reference: &ReferenceLightChunk) -> LightDiff
         "sky",
         reference.min_section,
         &reference.sky,
-        light.sky.sections(),
+        &light.sky,
     );
     diff_light_layer(
         &mut diffs,
         "block",
         reference.min_section,
         &reference.block,
-        light.block.sections(),
+        &light.block,
     );
 
     diffs
@@ -1401,11 +1401,10 @@ fn chunk_stage_hashes_inner() {
                 let local_quart_z = (quart_pos.z - neighbor_chunk_z * 4) as usize;
                 let local_quart_y = (quart_pos.y - min_qy).clamp(0, total_quarts_y - 1) as usize;
                 let section_index = local_quart_y / 4;
-                neighbor.sections.sections[section_index].read().biomes.get(
-                    local_quart_x,
-                    local_quart_y % 4,
-                    local_quart_z,
-                )
+                neighbor.sections.holders()[section_index]
+                    .read()
+                    .biomes
+                    .get(local_quart_x, local_quart_y % 4, local_quart_z)
             };
             generator.build_terrain(
                 GenerationChunk::<TerrainPhase>::for_test(chunk),

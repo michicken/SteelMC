@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use steel_utils::{BlockPos, SectionPos};
 
 use crate::chunk::section::Sections;
@@ -16,7 +18,80 @@ pub struct ChunkLightEmptinessMapLengthError {
     pub actual: usize,
 }
 
-const LIGHT_PLANE_SIZE: usize = DATA_LAYER_EDGE * DATA_LAYER_EDGE / 2;
+const LIGHT_PLANE_CELLS: usize = DATA_LAYER_EDGE * DATA_LAYER_EDGE;
+const LIGHT_PLANE_SIZE: usize = LIGHT_PLANE_CELLS / 2;
+
+/// Packed light with uniform Y planes represented by one nibble each.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LayeredLight {
+    selectors: [u8; DATA_LAYER_EDGE],
+    mixed: Box<[[u8; LIGHT_PLANE_SIZE]]>,
+}
+
+impl LayeredLight {
+    // The selectors and allocation headers must be smaller than the saved planes.
+    const MAX_MIXED_PLANES: usize = DATA_LAYER_EDGE - 2;
+
+    fn from_packed(data: &[u8; DATA_LAYER_SIZE]) -> Option<Self> {
+        let mut selectors = [0; DATA_LAYER_EDGE];
+        let mut mixed = smallvec::SmallVec::<[&[u8; LIGHT_PLANE_SIZE]; DATA_LAYER_EDGE]>::new();
+
+        for (selector, plane) in selectors
+            .iter_mut()
+            .zip(data.as_chunks::<LIGHT_PLANE_SIZE>().0)
+        {
+            let first = plane[0];
+            if first == LightSectionData::pack_filled(first)
+                && plane.iter().all(|&byte| byte == first)
+            {
+                *selector = first & MAX_LIGHT_LEVEL;
+                continue;
+            }
+
+            let index = if let Some(index) = mixed.iter().position(|&existing| existing == plane) {
+                index
+            } else {
+                if mixed.len() == Self::MAX_MIXED_PLANES {
+                    return None;
+                }
+                let index = mixed.len();
+                mixed.push(plane);
+                index
+            };
+            *selector = DATA_LAYER_EDGE as u8 + index as u8;
+        }
+
+        Some(Self {
+            selectors,
+            mixed: mixed.into_iter().copied().collect(),
+        })
+    }
+
+    fn get(&self, y: usize, xz_index: usize) -> u8 {
+        let selector = self.selectors[y];
+        if selector <= MAX_LIGHT_LEVEL {
+            return selector;
+        }
+        let plane = &self.mixed[usize::from(selector) - DATA_LAYER_EDGE];
+        LightSectionData::get_from_packed(plane, xz_index)
+    }
+
+    fn expand(&self) -> [u8; DATA_LAYER_SIZE] {
+        let mut bytes = [0; DATA_LAYER_SIZE];
+        for (&selector, plane) in self
+            .selectors
+            .iter()
+            .zip(bytes.as_chunks_mut::<LIGHT_PLANE_SIZE>().0)
+        {
+            if selector <= MAX_LIGHT_LEVEL {
+                plane.fill(LightSectionData::pack_filled(selector));
+            } else {
+                *plane = self.mixed[usize::from(selector) - DATA_LAYER_EDGE];
+            }
+        }
+        bytes
+    }
+}
 
 /// Storage representation for one present light section.
 #[derive(Debug, Clone, Eq)]
@@ -24,9 +99,11 @@ pub enum LightSectionData {
     /// One light value applies to the whole section.
     Homogeneous(u8),
     /// The same packed X/Z plane applies at every Y.
-    RepeatedPlane(Box<[u8; LIGHT_PLANE_SIZE]>),
+    RepeatedPlane(Arc<[u8; LIGHT_PLANE_SIZE]>),
+    /// Uniform and repeated horizontal planes in a section.
+    Layered(Arc<LayeredLight>),
     /// Vanilla low-nibble-first packed light values.
-    Packed(Box<[u8; DATA_LAYER_SIZE]>),
+    Packed(Arc<[u8; DATA_LAYER_SIZE]>),
 }
 
 impl PartialEq for LightSectionData {
@@ -34,7 +111,17 @@ impl PartialEq for LightSectionData {
         match (self, other) {
             (Self::Homogeneous(a), Self::Homogeneous(b)) => a == b,
             (Self::RepeatedPlane(a), Self::RepeatedPlane(b)) => a == b,
-            (Self::Packed(a), Self::Packed(b)) => a == b,
+            (Self::Packed(a), Self::Packed(b)) => Arc::ptr_eq(a, b) || a == b,
+            (Self::Layered(a), Self::Layered(b)) => Arc::ptr_eq(a, b) || a == b,
+            (Self::Layered(planes), Self::Packed(data))
+            | (Self::Packed(data), Self::Layered(planes)) => planes.expand() == **data,
+            (Self::Layered(planes), Self::RepeatedPlane(plane))
+            | (Self::RepeatedPlane(plane), Self::Layered(planes)) => planes
+                .expand()
+                .as_chunks::<LIGHT_PLANE_SIZE>()
+                .0
+                .iter()
+                .all(|candidate| candidate == plane.as_ref()),
             (Self::RepeatedPlane(plane), Self::Packed(data))
             | (Self::Packed(data), Self::RepeatedPlane(plane)) => data
                 .chunks_exact(LIGHT_PLANE_SIZE)
@@ -53,15 +140,26 @@ impl LightSectionData {
 
     /// Returns the light value at local section coordinates.
     #[must_use]
+    #[inline]
     pub fn get(&self, x: usize, y: usize, z: usize) -> u8 {
         debug_assert!(x < DATA_LAYER_EDGE);
         debug_assert!(y < DATA_LAYER_EDGE);
         debug_assert!(z < DATA_LAYER_EDGE);
+        self.get_at_index(Self::index(x, y, z))
+    }
 
+    #[inline]
+    pub(super) fn get_at_index(&self, index: usize) -> u8 {
+        debug_assert!(index < DATA_LAYER_SIZE * 2);
         match self {
             Self::Homogeneous(value) => *value,
-            Self::RepeatedPlane(plane) => Self::get_from_packed(plane.as_slice(), Self::index(x, 0, z)),
-            Self::Packed(data) => Self::get_from_packed(data.as_slice(), Self::index(x, y, z)),
+            Self::RepeatedPlane(plane) => {
+                Self::get_from_packed(plane.as_slice(), index % LIGHT_PLANE_CELLS)
+            }
+            Self::Layered(planes) => {
+                planes.get(index / LIGHT_PLANE_CELLS, index % LIGHT_PLANE_CELLS)
+            }
+            Self::Packed(data) => Self::get_from_packed(data.as_slice(), index),
         }
     }
 
@@ -70,24 +168,40 @@ impl LightSectionData {
         debug_assert!(x < DATA_LAYER_EDGE);
         debug_assert!(y < DATA_LAYER_EDGE);
         debug_assert!(z < DATA_LAYER_EDGE);
+        self.set_at_index(Self::index(x, y, z), value);
+    }
 
-        let index = Self::index(x, y, z);
+    pub(super) fn set_at_index(&mut self, index: usize, value: u8) {
+        debug_assert!(index < DATA_LAYER_SIZE * 2);
         match self {
             Self::Homogeneous(default_value) => {
-                let mut data = Box::new([Self::pack_filled(*default_value); DATA_LAYER_SIZE]);
+                let mut data = [Self::pack_filled(*default_value); DATA_LAYER_SIZE];
                 Self::set_in_packed(&mut data, index, value);
-                *self = Self::Packed(data);
+                *self = Self::Packed(Arc::new(data));
             }
             Self::RepeatedPlane(plane) => {
-                if Self::get_from_packed(plane.as_slice(), index % (LIGHT_PLANE_SIZE * 2))
+                if Self::get_from_packed(plane.as_slice(), index % LIGHT_PLANE_CELLS)
                     != value & MAX_LIGHT_LEVEL
                 {
                     let mut data = Self::expand_plane(plane);
                     Self::set_in_packed(&mut data, index, value);
-                    *self = Self::Packed(data);
+                    *self = Self::Packed(Arc::new(*data));
                 }
             }
-            Self::Packed(data) => Self::set_in_packed(data, index, value),
+            Self::Layered(planes) => {
+                if planes.get(index / LIGHT_PLANE_CELLS, index % LIGHT_PLANE_CELLS)
+                    != value & MAX_LIGHT_LEVEL
+                {
+                    let mut data = planes.expand();
+                    Self::set_in_packed(&mut data, index, value);
+                    *self = Self::Packed(Arc::new(data));
+                }
+            }
+            Self::Packed(data) => {
+                if Self::get_from_packed(data.as_slice(), index) != value & MAX_LIGHT_LEVEL {
+                    Self::set_in_packed(Arc::make_mut(data), index, value);
+                }
+            }
         }
     }
 
@@ -114,6 +228,7 @@ impl LightSectionData {
         match self {
             Self::Homogeneous(value) => *value == 0,
             Self::RepeatedPlane(plane) => plane.iter().all(|value| *value == 0),
+            Self::Layered(planes) => planes.selectors.iter().all(|&selector| selector == 0),
             Self::Packed(data) => data.iter().all(|value| *value == 0),
         }
     }
@@ -124,6 +239,7 @@ impl LightSectionData {
         match self {
             Self::Homogeneous(value) => Box::new([Self::pack_filled(*value); DATA_LAYER_SIZE]),
             Self::RepeatedPlane(plane) => Self::expand_plane(plane),
+            Self::Layered(planes) => Box::new(planes.expand()),
             Self::Packed(data) => Box::new(**data),
         }
     }
@@ -133,16 +249,33 @@ impl LightSectionData {
         let plane = std::array::from_fn(|index| {
             (row[2 * index] & MAX_LIGHT_LEVEL) | (row[2 * index + 1] & MAX_LIGHT_LEVEL) << 4
         });
-        Self::RepeatedPlane(Box::new(plane))
+        Self::RepeatedPlane(Arc::new(plane))
     }
 
-    /// Retains one plane when a saved section repeats it at every height.
+    /// Compacts a saved section without changing its expanded bytes.
     pub(crate) fn from_packed(data: Box<[u8; DATA_LAYER_SIZE]>) -> Self {
+        Self::compact_packed(&data).unwrap_or_else(|| Self::Packed(Arc::from(data)))
+    }
+
+    fn compact_packed(data: &[u8; DATA_LAYER_SIZE]) -> Option<Self> {
         let (first, remaining) = data.split_at(LIGHT_PLANE_SIZE);
-        if remaining.chunks_exact(LIGHT_PLANE_SIZE).all(|plane| plane == first) {
-            Self::RepeatedPlane(Box::new(std::array::from_fn(|index| first[index])))
-        } else {
-            Self::Packed(data)
+        if remaining
+            .chunks_exact(LIGHT_PLANE_SIZE)
+            .all(|plane| plane == first)
+        {
+            return Some(Self::RepeatedPlane(Arc::new(std::array::from_fn(
+                |index| first[index],
+            ))));
+        }
+
+        LayeredLight::from_packed(data).map(|planes| Self::Layered(Arc::new(planes)))
+    }
+
+    fn compact(&mut self) {
+        if let Self::Packed(data) = self
+            && let Some(compact) = Self::compact_packed(data)
+        {
+            *self = compact;
         }
     }
 
@@ -229,7 +362,7 @@ pub struct ChunkLightLayerStorage {
     layer: LightLayer,
     range: LightSectionRange,
     chunk_section_count: usize,
-    sections: Box<[LightSection]>,
+    sections: Option<Box<[LightSection]>>,
     emptiness_map: Option<Box<[bool]>>,
 }
 
@@ -237,14 +370,11 @@ impl ChunkLightLayerStorage {
     /// Creates missing light sections for every light section in a chunk.
     #[must_use]
     pub fn new(layer: LightLayer, range: LightSectionRange, chunk_section_count: usize) -> Self {
-        let sections = (0..range.section_count())
-            .map(|_| LightSection::missing())
-            .collect();
         Self {
             layer,
             range,
             chunk_section_count,
-            sections,
+            sections: None,
             emptiness_map: None,
         }
     }
@@ -261,16 +391,51 @@ impl ChunkLightLayerStorage {
         self.range
     }
 
-    /// Returns all chunk light sections.
+    /// Iterates over every section in the light range, including absent sections.
     #[must_use]
-    pub fn sections(&self) -> &[LightSection] {
-        &self.sections
+    pub fn sections(&self) -> impl ExactSizeIterator<Item = &LightSection> {
+        (0..self.range.section_count()).map(|index| self.section_at_valid_index(index))
     }
 
-    /// Returns all chunk light sections mutably.
+    /// Returns a light section at a zero-based index in the light range.
     #[must_use]
-    pub fn sections_mut(&mut self) -> &mut [LightSection] {
-        &mut self.sections
+    pub fn section_at_index(&self, index: usize) -> Option<&LightSection> {
+        (index < self.range.section_count()).then(|| self.section_at_valid_index(index))
+    }
+
+    fn section_at_valid_index(&self, index: usize) -> &LightSection {
+        self.sections
+            .as_deref()
+            .map_or(&LightSection::Missing, |sections| &sections[index])
+    }
+
+    /// Stores light data when the index is valid and its value has changed.
+    pub fn replace_section_at_index(&mut self, index: usize, mut section: LightSection) -> bool {
+        if self
+            .section_at_index(index)
+            .is_none_or(|current| *current == section)
+        {
+            return false;
+        }
+        if let LightSection::Visible(data) | LightSection::Internal(data) = &mut section {
+            data.compact();
+        }
+        if let Some(target) = self.section_at_index_mut(index) {
+            *target = section;
+        }
+        true
+    }
+
+    fn section_at_index_mut(&mut self, index: usize) -> Option<&mut LightSection> {
+        if index >= self.range.section_count() {
+            return None;
+        }
+        let sections = self.sections.get_or_insert_with(|| {
+            (0..self.range.section_count())
+                .map(|_| LightSection::missing())
+                .collect()
+        });
+        sections.get_mut(index)
     }
 
     /// Returns the number of real chunk sections tracked by the emptiness map.
@@ -284,13 +449,13 @@ impl ChunkLightLayerStorage {
     pub fn section(&self, section_y: i32) -> Option<&LightSection> {
         self.range
             .section_index(section_y)
-            .and_then(|index| self.sections.get(index))
+            .and_then(|index| self.section_at_index(index))
     }
 
     /// Returns a mutable light section for a section Y coordinate.
     pub fn section_mut(&mut self, section_y: i32) -> Option<&mut LightSection> {
         let index = self.range.section_index(section_y)?;
-        self.sections.get_mut(index)
+        self.section_at_index_mut(index)
     }
 
     /// Returns the current section emptiness map, if known.
@@ -361,8 +526,11 @@ impl ChunkLightLayerStorage {
             return;
         }
 
+        let Some(sections) = &mut self.sections else {
+            return;
+        };
         let mut below_loaded_data = false;
-        for section in self.sections.iter_mut().rev() {
+        for section in sections.iter_mut().rev() {
             if section.is_present() {
                 below_loaded_data = true;
                 continue;
@@ -510,6 +678,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_light_is_lazy_and_distinct_from_initialized_zero() {
+        let range = LightSectionRange::from_world_height(-16, 32)
+            .expect("a section-aligned range is valid");
+        let mut layer = ChunkLightLayerStorage::new(LightLayer::Block, range, 2);
+        assert_eq!(layer.sections().len(), range.section_count());
+        assert!(layer.sections().all(|section| !section.is_present()));
+        assert!(!layer.replace_section_at_index(0, LightSection::missing()));
+        assert!(layer.sections.is_none());
+
+        let zero = LightSection::visible(LightSectionData::homogeneous(0));
+        assert!(layer.replace_section_at_index(0, zero.clone()));
+        assert_eq!(layer.section_at_index(0), Some(&zero));
+        assert_eq!(layer.section_at_index(1), Some(&LightSection::Missing));
+        assert!(layer.section_at_index(range.section_count()).is_none());
+    }
+
+    #[test]
     fn sky_light_below_range_starts_search_at_min_light_section() {
         let Ok(range) = LightSectionRange::from_world_height(0, 16) else {
             panic!("valid test height should create a light section range");
@@ -527,11 +712,46 @@ mod tests {
 
         assert_eq!(storage.get_light_value(BlockPos::new(0, i32::MIN, 0)), 7);
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    #[test]
+    fn lighting_edits_share_unchanged_packed_storage() {
+        let data = LightSectionData::Packed(Arc::new([0x11; DATA_LAYER_SIZE]));
+        let mut edit = data.clone();
+        edit.set(0, 0, 0, 1);
+
+        let (LightSectionData::Packed(original), LightSectionData::Packed(copy)) = (&data, &edit)
+        else {
+            panic!("both sections should remain packed");
+        };
+        assert!(Arc::ptr_eq(original, copy));
+
+        edit.set(0, 0, 0, 2);
+        assert_eq!(data.get(0, 0, 0), 1);
+        assert_eq!(edit.get(0, 0, 0), 2);
+        assert_eq!(edit.get(1, 0, 0), 1);
+    }
+
+    #[test]
+    fn layered_light_preserves_wire_bytes_and_mutation() {
+        let mut bytes = Box::new([0xff; DATA_LAYER_SIZE]);
+        bytes[..LIGHT_PLANE_SIZE * 4].fill(0x00);
+        bytes[LIGHT_PLANE_SIZE * 5] = 0x78;
+        bytes[LIGHT_PLANE_SIZE * 6] = 0x78;
+
+        let mut data = LightSectionData::from_packed(bytes.clone());
+        let LightSectionData::Layered(planes) = &data else {
+            panic!("uniform and repeated planes should be compacted");
+        };
+        assert_eq!(planes.mixed.len(), 1);
+        assert_eq!(data.to_bytes(), bytes);
+        assert_eq!(data.get(0, 5, 0), 8);
+        assert_eq!(data.get(1, 6, 0), 7);
+
+        data.set(0, 5, 0, 4);
+        assert_eq!(data.get(0, 5, 0), 4);
+        assert_eq!(data.get(0, 6, 0), 8);
+        assert_eq!(data.get(0, 4, 0), 15);
+    }
 
     #[test]
     fn repeated_planes_round_trip_and_expand_only_on_a_changed_nibble() {
@@ -540,7 +760,7 @@ mod tests {
         let bytes = data.to_bytes();
 
         assert!(matches!(data, LightSectionData::RepeatedPlane(_)));
-        assert_eq!(data, LightSectionData::Packed(bytes.clone()));
+        assert_eq!(data, LightSectionData::Packed(Arc::from(bytes.clone())));
         assert_eq!(data, LightSectionData::from_packed(bytes));
         data.set(7, 10, 3, 7);
         assert!(matches!(data, LightSectionData::RepeatedPlane(_)));

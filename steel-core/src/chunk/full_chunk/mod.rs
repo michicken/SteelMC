@@ -209,7 +209,7 @@ impl FullChunkRef<'_> {
 
         while let Some(section_index) = random_tick_sections.next(next_section_index) {
             next_section_index = section_index + 1;
-            let section = &self.chunk.sections.sections[section_index];
+            let section = &self.chunk.sections.holders()[section_index];
             let section_base_y = self.min_y() + (section_index as i32 * 16);
             // Keep the guard across no-op samples. Extreme random tick speeds may
             // delay concurrent writers, but avoid lock churn in normal ticking.
@@ -283,7 +283,7 @@ impl Chunk {
                 HeightmapType::final_types(),
                 min_y,
                 height,
-                &proto_chunk.sections.sections,
+                proto_chunk.sections.holders(),
             );
             for &heightmap_type in HeightmapType::final_types() {
                 let _ = heightmaps.get_final(heightmap_type);
@@ -291,7 +291,7 @@ impl Chunk {
         }
 
         // Recalculate section counts for random tick optimization
-        for section in &proto_chunk.sections.sections {
+        for section in proto_chunk.sections.holders() {
             section.write().recalculate_counts();
         }
 
@@ -372,7 +372,7 @@ impl Chunk {
             HeightmapType::final_types(),
             min_y,
             height,
-            &sections.sections,
+            sections.holders(),
         );
 
         let chunk = Chunk::from_disk(
@@ -969,7 +969,7 @@ impl FullChunkRef<'_> {
         // `Vec::new()` doesn't allocate until the first push, so the common
         // empty case is allocation-free.
         let mut poi_sections: Vec<(usize, SectionPos)> = Vec::new();
-        for (i, section) in sections.sections.iter().enumerate() {
+        for (i, section) in sections.holders().iter().enumerate() {
             if section.read().contains_poi() {
                 let section_y = min_y / 16 + i as i32;
                 poi_sections.push((i, SectionPos::new(pos.0.x, section_y, pos.0.y)));
@@ -981,7 +981,7 @@ impl FullChunkRef<'_> {
 
         let mut poi_storage = world.poi_storage.lock();
         for (i, section_pos) in poi_sections {
-            let guard = sections.sections[i].read();
+            let guard = sections.holders()[i].read();
             poi_storage.scan_and_populate(&guard, section_pos);
         }
     }
@@ -1387,11 +1387,11 @@ impl FullChunkRef<'_> {
         }
 
         let section_index = self.get_section_index(y);
-        if section_index >= self.chunk.sections.sections.len() {
+        if section_index >= self.chunk.sections.len() {
             return f(REGISTRY.blocks.get_base_state_id(&vanilla_blocks::AIR));
         }
 
-        let section = self.chunk.sections.sections[section_index].read();
+        let section = self.chunk.sections.holders()[section_index].read();
         let state = if section.is_empty() {
             REGISTRY.blocks.get_base_state_id(&vanilla_blocks::AIR)
         } else {
@@ -1574,11 +1574,11 @@ impl FullChunkRef<'_> {
 
         let section_index = self.get_section_index(y);
 
-        if section_index >= self.chunk.sections.sections.len() {
+        if section_index >= self.chunk.sections.len() {
             return None;
         }
 
-        let section = &self.chunk.sections.sections[section_index];
+        let section = &self.chunk.sections.holders()[section_index];
 
         let local_x = (pos.0.x & 15) as usize;
         let local_y = (y & 15) as usize;
@@ -1639,7 +1639,7 @@ impl FullChunkRef<'_> {
             .update_final(local_x, y, local_z, state, |lx, scan_y, lz| {
                 let scan_section_index = ((scan_y - min_y) / 16) as usize;
                 let scan_local_y = ((scan_y - min_y) % 16) as usize;
-                sections.sections[scan_section_index]
+                sections.holders()[scan_section_index]
                     .read()
                     .states()
                     .get(lx, scan_local_y, lz)
@@ -1781,11 +1781,11 @@ impl FullChunkRef<'_> {
         let section_index = self.get_section_index(y);
 
         // `LevelChunk` returns air outside its section array; `World` handles void air.
-        if section_index >= self.chunk.sections.sections.len() {
+        if section_index >= self.chunk.sections.len() {
             return REGISTRY.blocks.get_base_state_id(&vanilla_blocks::AIR);
         }
 
-        let section = &self.chunk.sections.sections[section_index];
+        let section = &self.chunk.sections.holders()[section_index];
         let section_guard = section.read();
 
         if section_guard.is_empty() {
@@ -1804,7 +1804,7 @@ impl FullChunkRef<'_> {
     pub fn highest_filled_section_index(&self) -> Option<usize> {
         self.chunk
             .sections
-            .sections
+            .holders()
             .iter()
             .rposition(|section| !section.read().is_empty())
     }
@@ -1822,7 +1822,7 @@ impl FullChunkRef<'_> {
         let data = Vec::new();
 
         let mut cursor = Cursor::new(data);
-        self.chunk.sections.sections.iter().for_each(|section| {
+        self.chunk.sections.holders().iter().for_each(|section| {
             section.read().write(&mut cursor);
         });
 

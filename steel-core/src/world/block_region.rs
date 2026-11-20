@@ -137,7 +137,7 @@ impl BlockRegionWorkset {
                     .ok()?;
                     chunk
                         .sections()
-                        .sections
+                        .holders()
                         .get(section_index)
                         .map(|section| section.read())
                 });

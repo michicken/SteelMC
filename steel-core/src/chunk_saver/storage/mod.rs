@@ -747,11 +747,23 @@ impl ChunkStorage {
     ) -> PersistentChunk<'static> {
         let mut builder = ChunkBuilder::new(&REGISTRY);
 
-        let persistent_sections = sections
-            .sections
-            .iter()
-            .map(|section| Self::section_to_persistent(section, &mut builder))
-            .collect();
+        let persistent_sections = if let Some(holders) = sections.materialized() {
+            holders
+                .iter()
+                .map(|section| Self::section_to_persistent(section, &mut builder))
+                .collect()
+        } else {
+            let biome = builder.ensure_biome(steel_registry::RegistryEntry::id(
+                &*steel_registry::vanilla_biomes::PLAINS,
+            ) as u16);
+            let block_state = builder.ensure_block_state(BlockStateId(0));
+            (0..sections.len())
+                .map(|_| PersistentSection::Homogeneous {
+                    block_state,
+                    biomes: PersistentBiomeData::Homogeneous { biome },
+                })
+                .collect()
+        };
 
         // Serialize block entities
         let persistent_block_entities: Vec<PersistentBlockEntity> = block_entities

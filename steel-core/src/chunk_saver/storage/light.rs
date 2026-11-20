@@ -18,7 +18,6 @@ impl ChunkStorage {
     ) -> Vec<PersistentLightSection> {
         layer
             .sections()
-            .iter()
             .enumerate()
             .filter_map(|(index, section)| {
                 let Ok(section_index) = u32::try_from(index) else {
@@ -90,19 +89,19 @@ impl ChunkStorage {
                 continue;
             };
 
-            let Some(target) = layer.sections_mut().get_mut(section_index) else {
+            if section_index >= layer.range().section_count() {
                 tracing::warn!(
                     layer = layer_name,
                     section_index,
                     "Persisted light section index is outside world light range"
                 );
                 continue;
-            };
+            }
 
             let Some(restored) = Self::persistent_to_light_section(section, layer_name) else {
                 continue;
             };
-            *target = restored;
+            layer.replace_section_at_index(section_index, restored);
         }
     }
 

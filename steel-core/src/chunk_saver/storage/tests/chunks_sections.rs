@@ -4,6 +4,52 @@ use steel_registry::RegistryEntry as _;
 use steel_registry::vanilla_biomes;
 
 #[test]
+fn structure_only_chunks_stay_deferred_through_save_and_reload() {
+    init_vanilla_registry();
+    let pos = ChunkPos::new(0, 0);
+    let chunk = Chunk::new(Sections::deferred(2), pos, -16, 32, Weak::new());
+    let air = vanilla_blocks::AIR.default_state();
+
+    assert_eq!(chunk.sections().get_relative_block(0, 31, 0), Some(air));
+    assert_eq!(chunk.sections().get_relative_block(0, 32, 0), None);
+    assert!(chunk.sections().materialized().is_none());
+
+    let prepared =
+        ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::StructureStarts, &[], true)
+            .expect("a structure-only chunk should be saveable");
+    assert!(chunk.sections().materialized().is_none());
+    assert_eq!(prepared.persistent.sections.len(), 2);
+
+    let loaded = ChunkStorage::persistent_to_chunk(
+        &prepared.persistent,
+        pos,
+        ChunkStatus::StructureStarts,
+        -16,
+        32,
+        Weak::new(),
+    );
+    assert!(loaded.chunk.sections().materialized().is_none());
+    assert_eq!(
+        loaded.chunk.sections().get_relative_block(0, 31, 0),
+        Some(air)
+    );
+
+    let stone = vanilla_blocks::STONE.default_state();
+    loaded
+        .chunk
+        .sections()
+        .set_relative_block_for_generation(0, 31, 0, stone);
+    assert_eq!(
+        loaded.chunk.sections().get_relative_block(0, 31, 0),
+        Some(stone)
+    );
+    assert_eq!(
+        loaded.chunk.sections().get_relative_block(0, 15, 0),
+        Some(air)
+    );
+}
+
+#[test]
 #[should_panic(expected = "a chunk persisted as Full must have its Full runtime state initialized")]
 fn chunk_save_rejects_full_status_for_proto_data() {
     init_vanilla_registry();
@@ -105,7 +151,7 @@ fn proto_heightmap_save_preserves_existing_maps_and_load_primes_missing_maps() {
         &[HeightmapType::WorldSurfaceWg],
         0,
         16,
-        &proto.sections.sections,
+        proto.sections.holders(),
     );
     let chunk = proto;
 
@@ -213,7 +259,10 @@ fn proto_postprocessing_roundtrips_through_persistent_chunk() {
     );
     let loaded_proto = loaded.chunk;
 
-    assert_eq!(loaded_proto.postprocessing_for_serialization()[0], vec![packed]);
+    assert_eq!(
+        loaded_proto.postprocessing_for_serialization()[0],
+        vec![packed]
+    );
 }
 
 #[test]
@@ -249,11 +298,7 @@ fn full_chunk_postprocessing_roundtrips_through_persistent_chunk() {
         Weak::new(),
     );
     let chunk = loaded.chunk;
-    let loaded_full = FullChunkRef::from_full_context(&chunk);
-    assert_eq!(
-        loaded_full.postprocessing_for_serialization(),
-        vec![vec![packed]]
-    );
+    assert_eq!(chunk.postprocessing_for_serialization(), vec![vec![packed]]);
 
     chunk.mark_dirty();
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Full, &[], false)

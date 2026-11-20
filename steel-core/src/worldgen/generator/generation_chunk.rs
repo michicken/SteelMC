@@ -86,7 +86,7 @@ impl<'a, Phase> GenerationChunk<'a, Phase> {
     #[must_use]
     #[inline]
     pub fn section_count(self) -> usize {
-        self.chunk.sections().sections.len()
+        self.chunk.sections().len()
     }
 
     /// Reads one block using coordinates relative to the dimension's minimum Y.

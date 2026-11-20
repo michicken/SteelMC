@@ -757,7 +757,7 @@ mod tests {
             ],
             -16,
             32,
-            &sections.sections,
+            sections.holders(),
         );
 
         let first_available = |heightmap_type, x, z| {
