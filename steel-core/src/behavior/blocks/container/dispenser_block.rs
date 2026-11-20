@@ -22,7 +22,9 @@ use steel_registry::blocks::properties::{
 use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_block_entity_types;
 use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
-use steel_utils::{BlockPos, BlockStateId, Downcast as _, types::UpdateFlags};
+use steel_utils::{
+    BlockPos, BlockStateId, Downcast as _, random::Random as _, types::UpdateFlags,
+};
 
 use crate::behavior::BlockPlaceContext;
 use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
@@ -156,7 +158,9 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
     let Some(size) = guard.get(own_id).map(Container::get_container_size) else {
         return;
     };
-    let mut picked: Option<(usize, ItemStack)> = None;
+    // Vanilla picks a random non-empty slot; collect all of them instead of
+    // taking the first one.
+    let mut non_empty: Vec<(usize, ItemStack)> = Vec::new();
     for slot in 0..size {
         let Some(stack) = guard
             .get(own_id)
@@ -165,13 +169,19 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
             return;
         };
         if !stack.is_empty() {
-            picked = Some((slot, stack));
-            break;
+            non_empty.push((slot, stack));
         }
     }
-    let Some((slot, stack)) = picked else {
+    let Some(first) = non_empty.first().cloned() else {
         return;
     };
+    let index = world
+        .loot_random
+        .try_lock()
+        .map(|mut rng| rng.next_i32_bounded(non_empty.len() as i32) as usize)
+        .unwrap_or(0)
+        .min(non_empty.len() - 1);
+    let (slot, stack) = non_empty.into_iter().nth(index).unwrap_or(first);
 
     if !dropper {
         let special = if stack.item == &*vanilla_items::MINECART {
@@ -1170,10 +1180,16 @@ mod tests {
     }
 
     #[test]
-    fn dispenser_spawns_real_boat_and_armor_stand_entities() {
+    fn dispenser_spawns_real_boat_on_water_and_armor_stand_entities() {
         let fixture = fixture("dispenser_boat_armor_stand");
         let state = facing_down(&vanilla_blocks::DISPENSER);
         place_machine(&fixture.world, state, false);
+        // Boats only dispense onto water; fill the block below the dispenser.
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::WATER.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        ));
         set_slot(
             &fixture.world,
             DISPENSER_POS,
@@ -1184,10 +1200,15 @@ mod tests {
         assert_eq!(
             entities_in_front(&fixture.world, &vanilla_entities::OAK_BOAT),
             1,
-            "oak boat item must spawn a real oak_boat entity"
+            "oak boat item must spawn a real oak_boat entity on water"
         );
         assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
 
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::AIR.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        ));
         set_slot(
             &fixture.world,
             DISPENSER_POS,
@@ -1201,6 +1222,210 @@ mod tests {
             "armor stand item must spawn a real armor_stand entity"
         );
         assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
+    }
+
+    #[test]
+    fn dispenser_boat_on_land_ejects_item_instead_of_spawning_boat() {
+        let fixture = fixture("dispenser_boat_land");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::OAK_BOAT),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::OAK_BOAT),
+            0,
+            "a boat on land must not spawn a boat entity"
+        );
+        let dropped = dropped_items(&fixture.world, DISPENSER_POS.get_center());
+        assert_eq!(
+            dropped.len(),
+            1,
+            "the boat must fall back to being ejected as an item"
+        );
+        assert!(
+            dropped[0]
+                .downcast_ref::<crate::entity::entities::ItemEntity>()
+                .is_some_and(|item| item.get_item().is(&vanilla_items::OAK_BOAT)),
+            "the ejected item must be the oak boat"
+        );
+    }
+
+    #[test]
+    fn dispenser_random_slot_dispenses_both_non_empty_items() {
+        use steel_utils::random::{RandomSource, legacy_random::LegacyRandom};
+
+        let fixture = fixture("dispenser_random_slot");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        *fixture.world.loot_random.lock() =
+            RandomSource::Legacy(LegacyRandom::from_seed(42));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::with_count(&vanilla_items::STONE, 8),
+        );
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            1,
+            ItemStack::with_count(&vanilla_items::DIRT, 8),
+        );
+
+        let behavior = DispenserBlock::new(&vanilla_blocks::DISPENSER);
+        for _ in 0..12 {
+            behavior.tick(state, &fixture.world, DISPENSER_POS);
+        }
+
+        let mut saw_stone = false;
+        let mut saw_dirt = false;
+        for entity in dropped_items(&fixture.world, DISPENSER_POS.get_center()) {
+            if let Some(item) = entity.downcast_ref::<crate::entity::entities::ItemEntity>() {
+                let stack = item.get_item();
+                saw_stone |= stack.is(&vanilla_items::STONE);
+                saw_dirt |= stack.is(&vanilla_items::DIRT);
+            }
+        }
+        assert!(saw_stone, "random slot must dispense stone from slot 0");
+        assert!(saw_dirt, "random slot must dispense dirt from slot 1");
+    }
+
+    #[test]
+    fn dispenser_flint_and_steel_primes_tnt_in_front() {
+        let fixture = fixture("dispenser_flint_tnt");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::TNT.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        ));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::FLINT_AND_STEEL),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            fixture.world.get_block_state(BELOW_POS).get_block(),
+            &vanilla_blocks::AIR,
+            "flint and steel must remove the TNT it primes"
+        );
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::TNT),
+            1,
+            "flint and steel must prime a primed TNT entity"
+        );
+    }
+
+    #[test]
+    fn dispenser_tnt_primes_even_when_tnt_explodes_rule_disabled() {
+        let fixture = fixture("dispenser_tnt_rule_off");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(fixture.world.set_game_rule(
+            &steel_registry::vanilla_game_rules::TNT_EXPLODES,
+            false
+        ));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::with_count(&vanilla_items::TNT, 1),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            entities_in_front(&fixture.world, &vanilla_entities::TNT),
+            1,
+            "TNT must still prime when tntExplodes is disabled"
+        );
+    }
+
+    #[test]
+    fn dispenser_bonemeal_stays_in_dispenser_on_non_fertilizable_target() {
+        let fixture = fixture("dispenser_bonemeal_keep");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::STONE.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        ));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::with_count(&vanilla_items::BONE_MEAL, 4),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        assert_eq!(
+            count_at(&fixture.world, DISPENSER_POS, 0),
+            4,
+            "bonemeal must remain in the dispenser when the target is not fertilizable"
+        );
+        assert_eq!(
+            dropped_items(&fixture.world, DISPENSER_POS.get_center()).len(),
+            0,
+            "bonemeal must not be ejected as an item"
+        );
+    }
+
+    #[test]
+    fn dispenser_water_bottle_fills_empty_cauldron() {
+        use steel_registry::blocks::properties::BlockStateProperties;
+
+        let fixture = fixture("dispenser_cauldron_fill");
+        let state = facing_down(&vanilla_blocks::DISPENSER);
+        place_machine(&fixture.world, state, false);
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::CAULDRON.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        ));
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            steel_registry::data_components::PotionContents::create_item_stack(
+                &vanilla_items::POTION,
+                &steel_registry::vanilla_potions::WATER,
+            ),
+        );
+
+        DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+
+        let filled = fixture.world.get_block_state(BELOW_POS);
+        assert_eq!(
+            filled.get_block(),
+            &vanilla_blocks::WATER_CAULDRON,
+            "water bottle must fill an empty cauldron"
+        );
+        let filled_level: u8 = filled.get_value(&BlockStateProperties::LEVEL_CAULDRON);
+        assert_eq!(filled_level, 1);
+        let container = container_at(&fixture.world, DISPENSER_POS);
+        let guard = ContainerLockGuard::lock_all(&[&container]).expect("lock");
+        assert!(
+            guard
+                .get(container.container_id())
+                .expect("inventory")
+                .get_item(0)
+                .is(&vanilla_items::GLASS_BOTTLE),
+            "water bottle must return a glass bottle"
+        );
     }
 
     #[test]
@@ -1360,6 +1585,12 @@ mod tests {
         let fixture = fixture("dispenser_chest_boat_inventory");
         let state = facing_down(&vanilla_blocks::DISPENSER);
         place_machine(&fixture.world, state, false);
+        // Chest boats also require water to dispense, matching vanilla.
+        assert!(fixture.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::WATER.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        ));
         set_slot(
             &fixture.world,
             DISPENSER_POS,

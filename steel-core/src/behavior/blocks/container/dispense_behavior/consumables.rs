@@ -39,8 +39,10 @@ impl DispenseItemBehavior for BoneMealDispenseBehavior {
             item.shrink(1);
             item
         } else {
-            // Vanilla falls back to ejecting one item when the target is not bonemealable.
-            DefaultDispenseBehavior.dispense(world, pos, state, item)
+            // Vanilla keeps the bonemeal in the dispenser when the target is not
+            // bonemealable; it must not be ejected as an item entity.
+            world.level_event(level_events::SOUND_DISPENSER_FAIL, pos, 0, None);
+            item
         }
     }
 }

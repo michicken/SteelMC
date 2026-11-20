@@ -2,9 +2,7 @@ use std::sync::Arc;
 use steel_protocol::packets::game::SoundSource;
 use steel_registry::blocks::block_state_ext::BlockStateExt;
 use steel_registry::item_stack::ItemStack;
-use steel_registry::{
-    level_events, sound_events, vanilla_entities, vanilla_game_events, vanilla_game_rules,
-};
+use steel_registry::{level_events, sound_events, vanilla_entities, vanilla_game_events};
 use steel_utils::BlockPos;
 use steel_utils::BlockStateId;
 
@@ -25,11 +23,9 @@ impl DispenseItemBehavior for TntDispenseBehavior {
         state: BlockStateId,
         mut item: ItemStack,
     ) -> ItemStack {
-        if !world.get_game_rule(&vanilla_game_rules::TNT_EXPLODES) {
-            world.level_event(level_events::SOUND_DISPENSER_FAIL, pos, 0, None);
-            return item;
-        }
-
+        // Vanilla primes the TNT regardless of the `tntExplodes` game rule; that
+        // rule only gates whether the primed entity's explosion damages blocks
+        // and entities at explosion time.
         // TODO: sulfur cube - vanilla first tries SulfurCubeBlockDispenseItemBehavior.dispenseBlock.
         let facing = state.get_value(FACING);
         let target_pos = pos.relative(facing);

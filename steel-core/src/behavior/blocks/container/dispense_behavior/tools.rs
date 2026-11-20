@@ -1,10 +1,10 @@
 use crate::world::game_event::GameEventContext;
 use std::sync::Arc;
+use steel_protocol::packets::game::SoundSource;
 use steel_registry::blocks::block_state_ext::BlockStateExt;
-use steel_registry::blocks::properties::BlockStateProperties;
 use steel_registry::item_stack::ItemStack;
 use steel_registry::level_events;
-use steel_registry::vanilla_game_events;
+use steel_registry::{sound_events, vanilla_blocks, vanilla_entities, vanilla_game_events};
 use steel_utils::BlockPos;
 use steel_utils::BlockStateId;
 use steel_utils::types::UpdateFlags;
@@ -12,13 +12,8 @@ use steel_utils::types::UpdateFlags;
 use super::DispenseItemBehavior;
 use crate::behavior::blocks::FireBlock;
 use crate::behavior::blocks::container::dispenser_block::FACING;
+use crate::entity::{Entity, entities::PrimedTntEntity, next_entity_id};
 use crate::world::World;
-
-fn can_light(state: BlockStateId) -> bool {
-    !state
-        .try_get_value(&BlockStateProperties::LIT)
-        .unwrap_or(true)
-}
 
 pub struct FlintAndSteelDispenseBehavior;
 
@@ -35,18 +30,33 @@ impl DispenseItemBehavior for FlintAndSteelDispenseBehavior {
         let target_state = world.get_block_state(target_pos);
         let mut success = false;
 
-        if can_light(target_state) {
-            world.set_block(
-                target_pos,
-                target_state.set_value(&BlockStateProperties::LIT, true),
-                UpdateFlags::UPDATE_ALL_IMMEDIATE,
-            );
-            world.game_event(
-                &vanilla_game_events::BLOCK_CHANGE,
-                target_pos,
-                &GameEventContext::new(None, None),
-            );
-            success = true;
+        // Vanilla: flint and steel facing TNT primes that TNT directly.
+        if target_state.get_block() == &vanilla_blocks::TNT {
+            let tnt = Arc::new(PrimedTntEntity::primed(
+                &vanilla_entities::TNT,
+                next_entity_id(),
+                target_pos.get_bottom_center(),
+                world,
+                None,
+            ));
+            let tnt_pos = tnt.position();
+            if world.try_add_entity(tnt).is_ok() {
+                world.play_sound_at(
+                    &sound_events::ENTITY_TNT_PRIMED,
+                    SoundSource::Blocks,
+                    tnt_pos,
+                    1.0,
+                    1.0,
+                    None,
+                );
+                world.game_event(
+                    &vanilla_game_events::ENTITY_PLACE,
+                    target_pos,
+                    &GameEventContext::default(),
+                );
+                world.remove_block(target_pos, false);
+                success = true;
+            }
         } else if FireBlock::can_be_placed_at(world, target_pos, facing) {
             world.set_block(
                 target_pos,

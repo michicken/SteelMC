@@ -115,12 +115,16 @@ pub static DISPENSE_BEHAVIORS: LazyLock<DispenseBehaviorRegistry> = LazyLock::ne
         Box::new(ArrowDispenseBehavior::new(&vanilla_entities::ARROW)),
     );
 
-    // boats and rafts: the item key and entity key are identical.
+    // boats and rafts: the item key and entity key are identical. Boats only
+    // dispense onto water; off water the item ejects as a dropped item.
     for (_, item) in REGISTRY.items.iter() {
         let path = item.key.path.as_ref();
         if path.ends_with("_boat") || path.ends_with("_raft") {
             if let Some(entity_type) = REGISTRY.entity_types.by_key(&item.key) {
-                registry.set_behavior(item, Box::new(SpawnEntityDispenseBehavior::new(entity_type)));
+                registry.set_behavior(
+                    item,
+                    Box::new(SpawnEntityDispenseBehavior::new(entity_type).require_water()),
+                );
             }
         }
     }

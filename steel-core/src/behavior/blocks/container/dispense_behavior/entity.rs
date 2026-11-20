@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use steel_registry::blocks::block_state_ext::BlockStateExt;
 use steel_registry::entity_type::EntityTypeRef;
+use steel_registry::fluid::FluidStateExt;
 use steel_registry::item_stack::ItemStack;
 use steel_registry::{level_events, vanilla_entities};
 use steel_utils::{BlockPos, BlockStateId};
@@ -16,13 +17,32 @@ use crate::world::World;
 /// Spawns one entity of `entity_type` in front of the dispenser.
 pub struct SpawnEntityDispenseBehavior {
     entity_type: EntityTypeRef,
+    /// Boats/rafts only dispense onto water; off water they fall back to the
+    /// default item ejection, matching Vanilla.
+    require_water: bool,
 }
 
 impl SpawnEntityDispenseBehavior {
     /// Creates the behavior for one entity type.
     #[must_use]
     pub const fn new(entity_type: EntityTypeRef) -> Self {
-        Self { entity_type }
+        Self {
+            entity_type,
+            require_water: false,
+        }
+    }
+
+    /// Marks this entity as water-bound (boats and rafts).
+    #[must_use]
+    pub const fn require_water(mut self) -> Self {
+        self.require_water = true;
+        self
+    }
+
+    fn has_water_underneath(world: &Arc<World>, target_pos: BlockPos) -> bool {
+        let target_fluid = world.get_block_state(target_pos).get_fluid_state();
+        let below_fluid = world.get_block_state(target_pos.below()).get_fluid_state();
+        target_fluid.is_water() || below_fluid.is_water()
     }
 }
 
@@ -36,6 +56,11 @@ impl DispenseItemBehavior for SpawnEntityDispenseBehavior {
     ) -> ItemStack {
         let facing = state.get_value(FACING);
         let target_pos = pos.relative(facing);
+
+        if self.require_water && !Self::has_water_underneath(world, target_pos) {
+            return DefaultDispenseBehavior.dispense(world, pos, state, item);
+        }
+
         let request = EntitySpawnRequest {
             entity_type: self.entity_type,
             placement: EntitySpawnPlacement::Block {
