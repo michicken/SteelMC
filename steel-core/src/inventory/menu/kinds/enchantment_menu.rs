@@ -309,7 +309,8 @@ impl MenuKind for EnchantmentKind {
 
         {
             let mut experience = player.experience.lock();
-            experience.on_enchantment_performed(enchantment_cost, rand::random());
+            let next_seed = self.world.loot_random.lock().next_i32();
+            experience.on_enchantment_performed(enchantment_cost, next_seed);
             self.enchantment_seed = experience.enchantment_seed();
         }
 

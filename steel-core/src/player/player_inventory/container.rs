@@ -116,11 +116,11 @@ impl Container for PlayerInventory {
         let max_size = self.get_max_stack_size_for_item(stack);
         let mut changed = false;
 
-        // Vanilla prioritizes the selected slot, then an existing compatible
-        // offhand stack, before scanning the remaining main inventory.
+        // Vanilla prioritizes the selected slot before scanning the remaining
+        // main inventory; offhand stacks are never merged on pickup.
         if stack.is_stackable() {
             let selected = self.selected as usize;
-            for slot in [selected, Self::SLOT_OFFHAND] {
+            for slot in [selected] {
                 if stack.is_empty() {
                     if changed {
                         self.set_changed();

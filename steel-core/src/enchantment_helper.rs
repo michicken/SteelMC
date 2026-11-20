@@ -5,6 +5,7 @@ use std::sync::Arc;
 use item_in_use::EnchantedItemInUse;
 use steel_math::round_f32;
 use steel_utils::TICKS_PER_SECOND;
+use steel_utils::random::Random as _;
 
 use steel_registry::enchantment_effect::{
     DamageSourcePredicate, EnchantmentEffectComponent, EnchantmentEffectRequirements,
@@ -410,8 +411,12 @@ fn apply_post_attack_effects(
             let Some(enchanted_entity) = context.affected_entity(enchanted_target) else {
                 continue;
             };
-            let requirements_match =
-                post_attack_requirements_match(effect.requirements, &damage_context, level);
+            let requirements_match = post_attack_requirements_match(
+                effect.requirements,
+                &damage_context,
+                level,
+                world,
+            );
             if !requirements_match {
                 continue;
             }
@@ -459,7 +464,7 @@ pub(crate) fn on_projectile_spawned(
     for (enchantment, level) in enchantments {
         let level = level as i32;
         for effect in enchantment.effects.projectile_spawned {
-            if entity_requirements_match(effect.requirements, projectile, level) {
+            if entity_requirements_match(effect.requirements, projectile, level, world) {
                 let _ = apply_entity_effect(
                     world,
                     &effect.effect,
@@ -497,7 +502,7 @@ pub(crate) fn do_post_piercing_attack_effects(world: &World, user: &dyn LivingEn
 
         let level = *level as i32;
         for effect in enchantment.effects.post_piercing_attack {
-            if !entity_requirements_match(effect.requirements, user, level) {
+            if !entity_requirements_match(effect.requirements, user, level, world) {
                 continue;
             }
             if apply_post_piercing_entity_effect(world, &effect.effect, level, user) {
@@ -584,7 +589,7 @@ fn apply_supported_entity_effect(
         } => {
             let min_damage = min_damage.calculate(level);
             let max_damage = max_damage.calculate(level);
-            let damage = random_between(min_damage, max_damage);
+            let damage = random_between(world, min_damage, max_damage);
             let source = match enchanted_entity {
                 Some(entity) => DamageSource::direct(damage_type, Arc::clone(entity)),
                 None => DamageSource::environment(damage_type),
@@ -611,8 +616,8 @@ fn apply_supported_entity_effect(
             let max_duration = max_duration.calculate(level);
             let min_amplifier = min_amplifier.calculate(level);
             let max_amplifier = max_amplifier.calculate(level);
-            let duration_seconds = random_between(min_duration, max_duration);
-            let amplifier = random_between(min_amplifier, max_amplifier);
+            let duration_seconds = random_between(world, min_duration, max_duration);
+            let amplifier = random_between(world, min_amplifier, max_amplifier);
             let duration_ticks = round_f32(duration_seconds * TICKS_PER_SECOND as f32);
             let amplifier = round_f32(amplifier).max(0);
             living.add_mob_effect(MobEffectInstance::with_duration(
@@ -730,8 +735,23 @@ fn apply_supported_post_piercing_entity_effect(
     }
 }
 
-fn random_between(min: f32, max: f32) -> f32 {
-    min + rand::random::<f32>() * (max - min)
+fn random_between(world: &World, min: f32, max: f32) -> f32 {
+    min + world_next_f32(world) * (max - min)
+}
+
+/// Draws one roll from the world's live loot stream. The lock is held only for
+/// the single draw, so nested damage or effect handling cannot deadlock on it.
+///
+/// If the stream is already borrowed on this call stack (or by another worker),
+/// the per-entity random source is not yet exposed outside `entity/**`; that
+/// exposure is tracked as a cross-group follow-up. The OS-RNG fallback keeps
+/// the effect working instead of dropping it, but those few fallback rolls are
+/// non-deterministic.
+fn world_next_f32(world: &World) -> f32 {
+    match world.loot_random.try_lock() {
+        Some(mut random) => random.next_f32(),
+        None => rand::random::<f32>(),
+    }
 }
 
 fn requirements_match(
@@ -749,13 +769,14 @@ fn post_attack_requirements_match(
     requirements: Option<&'static EnchantmentEffectRequirements>,
     context: &EnchantmentDamageContext<'_>,
     level: i32,
+    world: &World,
 ) -> bool {
     let Some(requirements) = requirements else {
         return true;
     };
 
     matches!(
-        requirements_state_with_random(requirements, context, level),
+        requirements_state_with_random(requirements, context, level, world),
         Some(true)
     )
 }
@@ -806,12 +827,13 @@ fn requirements_state_with_random(
     requirements: &'static EnchantmentEffectRequirements,
     context: &EnchantmentDamageContext<'_>,
     level: i32,
+    world: &World,
 ) -> Option<bool> {
     match requirements {
         EnchantmentEffectRequirements::AllOf(terms) => {
             let mut has_unknown = false;
             for term in *terms {
-                match requirements_state_with_random(term, context, level) {
+                match requirements_state_with_random(term, context, level, world) {
                     Some(true) => {}
                     Some(false) => return Some(false),
                     None => has_unknown = true,
@@ -822,7 +844,7 @@ fn requirements_state_with_random(
         EnchantmentEffectRequirements::AnyOf(terms) => {
             let mut has_unknown = false;
             for term in *terms {
-                match requirements_state_with_random(term, context, level) {
+                match requirements_state_with_random(term, context, level, world) {
                     Some(true) => return Some(true),
                     Some(false) => {}
                     None => has_unknown = true,
@@ -831,7 +853,8 @@ fn requirements_state_with_random(
             if has_unknown { None } else { Some(false) }
         }
         EnchantmentEffectRequirements::Inverted(term) => {
-            requirements_state_with_random(term, context, level).map(|matched| !matched)
+            requirements_state_with_random(term, context, level, world)
+                .map(|matched| !matched)
         }
         EnchantmentEffectRequirements::EntityProperties { entity, predicate } => context
             .entity_type(*entity)
@@ -840,7 +863,7 @@ fn requirements_state_with_random(
             damage_source_predicate_matches(predicate, context.damage_source),
         ),
         EnchantmentEffectRequirements::RandomChance { chance } => {
-            Some(rand::random::<f32>() < chance.calculate(level))
+            Some(world_next_f32(world) < chance.calculate(level))
         }
         EnchantmentEffectRequirements::MatchTool { .. }
         | EnchantmentEffectRequirements::Unsupported { .. } => None,
@@ -851,13 +874,14 @@ fn entity_requirements_match(
     requirements: Option<&'static EnchantmentEffectRequirements>,
     entity: &dyn Entity,
     level: i32,
+    world: &World,
 ) -> bool {
     let Some(requirements) = requirements else {
         return true;
     };
 
     matches!(
-        entity_requirements_state(requirements, entity, level),
+        entity_requirements_state(requirements, entity, level, world),
         Some(true)
     )
 }
@@ -866,12 +890,13 @@ fn entity_requirements_state(
     requirements: &'static EnchantmentEffectRequirements,
     entity: &dyn Entity,
     level: i32,
+    world: &World,
 ) -> Option<bool> {
     match requirements {
         EnchantmentEffectRequirements::AllOf(terms) => {
             let mut has_unknown = false;
             for term in *terms {
-                match entity_requirements_state(term, entity, level) {
+                match entity_requirements_state(term, entity, level, world) {
                     Some(true) => {}
                     Some(false) => return Some(false),
                     None => has_unknown = true,
@@ -882,7 +907,7 @@ fn entity_requirements_state(
         EnchantmentEffectRequirements::AnyOf(terms) => {
             let mut has_unknown = false;
             for term in *terms {
-                match entity_requirements_state(term, entity, level) {
+                match entity_requirements_state(term, entity, level, world) {
                     Some(true) => return Some(true),
                     Some(false) => {}
                     None => has_unknown = true,
@@ -891,14 +916,14 @@ fn entity_requirements_state(
             if has_unknown { None } else { Some(false) }
         }
         EnchantmentEffectRequirements::Inverted(term) => {
-            entity_requirements_state(term, entity, level).map(|matched| !matched)
+            entity_requirements_state(term, entity, level, world).map(|matched| !matched)
         }
         EnchantmentEffectRequirements::EntityProperties {
             entity: EnchantmentEntityTarget::This,
             predicate,
         } => entity_predicate_matches_entity(predicate, entity),
         EnchantmentEffectRequirements::RandomChance { chance } => {
-            Some(rand::random::<f32>() < chance.calculate(level))
+            Some(world_next_f32(world) < chance.calculate(level))
         }
         EnchantmentEffectRequirements::EntityProperties { .. }
         | EnchantmentEffectRequirements::DamageSourceProperties(_)
@@ -1042,6 +1067,7 @@ mod tests {
     use std::sync::{Arc, Weak};
 
     use glam::DVec3;
+    use steel_registry::enchantment_effect::LevelBasedValue;
     use steel_registry::entity_type::EntityTypeRef;
     use steel_registry::items::ItemRef;
     use steel_registry::{
@@ -1050,13 +1076,15 @@ mod tests {
     };
     use steel_utils::Identifier;
     use steel_utils::locks::SyncMutex;
+    use steel_utils::random::RandomSource;
+    use steel_utils::random::legacy_random::LegacyRandom;
 
     use super::*;
     use crate::behavior::init_behaviors;
     use crate::entity::{
         EntityBase, LivingEntity, LivingEntityBase, entities::FireworkRocketEntity,
     };
-    use crate::test_support::{enchanted_item, test_world};
+    use crate::test_support::{enchanted_item, fresh_test_world, test_world};
 
     struct TestLivingEntity {
         base: EntityBase,
@@ -1488,7 +1516,12 @@ mod tests {
         let user = TestLivingEntity::new(1, &vanilla_entities::ZOMBIE);
         let effects = vanilla_enchantments::LUNGE.effects.post_piercing_attack;
         assert_eq!(effects.len(), 1);
-        assert!(entity_requirements_match(effects[0].requirements, &user, 1));
+        assert!(entity_requirements_match(
+            effects[0].requirements,
+            &user,
+            1,
+            test_world()
+        ));
         assert!(post_piercing_entity_effect_is_supported(&effects[0].effect));
     }
 
@@ -1546,5 +1579,52 @@ mod tests {
         assert_eq!(slowness.duration(), 30);
         assert_eq!(slowness.amplifier(), 3);
         assert!(zombie.mob_effect(vanilla_mob_effects::SLOWNESS).is_none());
+    }
+
+    #[test]
+    fn random_between_uses_seeded_world_stream_deterministically() {
+        init_vanilla_registry();
+
+        let world = fresh_test_world("enchant_random_between");
+        *world.world.loot_random.lock() =
+            RandomSource::Legacy(LegacyRandom::from_seed(42));
+
+        let first = random_between(&world.world, 2.0, 6.0);
+        assert!((2.0..6.0).contains(&first));
+
+        *world.world.loot_random.lock() =
+            RandomSource::Legacy(LegacyRandom::from_seed(42));
+        let second = random_between(&world.world, 2.0, 6.0);
+        assert_f32_eq(first, second);
+    }
+
+    static HALF_CHANCE: LevelBasedValue = LevelBasedValue::Constant(0.5);
+    const RANDOM_CHANCE_REQ: EnchantmentEffectRequirements =
+        EnchantmentEffectRequirements::RandomChance { chance: &HALF_CHANCE };
+
+    #[test]
+    fn random_chance_roll_uses_seeded_world_stream_deterministically() {
+        init_vanilla_registry();
+
+        let world = fresh_test_world("enchant_random_chance");
+        let damage_source = DamageSource::environment(&vanilla_damage_types::PLAYER_ATTACK);
+        let context = EnchantmentDamageContext::new(
+            &vanilla_entities::PLAYER,
+            Some(&vanilla_entities::PLAYER),
+            Some(&vanilla_entities::PLAYER),
+            &damage_source,
+        );
+
+        *world.world.loot_random.lock() =
+            RandomSource::Legacy(LegacyRandom::from_seed(7));
+        let first =
+            requirements_state_with_random(&RANDOM_CHANCE_REQ, &context, 1, &world.world);
+
+        *world.world.loot_random.lock() =
+            RandomSource::Legacy(LegacyRandom::from_seed(7));
+        let second =
+            requirements_state_with_random(&RANDOM_CHANCE_REQ, &context, 1, &world.world);
+
+        assert_eq!(first, second);
     }
 }

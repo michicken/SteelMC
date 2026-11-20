@@ -53,11 +53,21 @@ impl GrindstoneResultHandler {
             + Self::get_experience_from_item(input.get_item(1));
 
         if amount > 0 {
-            // Ceiling division; `amount` is positive here so truncation cannot bite.
-            let half_amount = (amount + 1) / 2;
+            let half_amount = Self::half_experience(amount);
             return half_amount + rand::random_range(0..half_amount);
         }
         0
+    }
+
+    /// Vanilla `GrindstoneMenu.getExperience`: half the combined enchanting
+    /// cost, rounded down, clamped to at least one point when any cost exists.
+    fn half_experience(total: i32) -> i32 {
+        if total <= 0 {
+            0
+        } else {
+            let half = total / 2;
+            if half < 1 { 1 } else { half }
+        }
     }
 
     fn get_experience_from_item(item: &ItemStack) -> i32 {
@@ -123,5 +133,110 @@ impl ResultHandler for GrindstoneResultHandler {
 
     fn is_result_valid(&self, _guard: &ContainerLockGuard, _player: &Player) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use steel_registry::{
+        init_vanilla_registry, item_stack::ItemStack, vanilla_enchantments, vanilla_items,
+    };
+    use steel_utils::{BlockPos, ChunkPos, locks::IntoShared as _};
+
+    use super::GrindstoneResultHandler;
+    use crate::{
+        behavior::init_behaviors,
+        inventory::{
+            container::{Container as _, ResultContainer, SimpleContainer},
+            lock::{ContainerId, ContainerLockGuard, ContainerRef},
+            slots::result_handler::ResultHandler,
+        },
+        test_support::{TestPlayerBuilder, fresh_test_world, insert_ready_full_chunk},
+    };
+
+    #[test]
+    fn half_experience_rounds_down_with_one_point_floor() {
+        // 0 costs grant no experience; any positive cost grants at least one.
+        assert_eq!(GrindstoneResultHandler::half_experience(0), 0);
+        assert_eq!(GrindstoneResultHandler::half_experience(1), 1);
+        assert_eq!(GrindstoneResultHandler::half_experience(2), 1);
+        // Odd totals round down (vanilla floorDiv), not up.
+        assert_eq!(GrindstoneResultHandler::half_experience(3), 1);
+        assert_eq!(GrindstoneResultHandler::half_experience(4), 2);
+        assert_eq!(GrindstoneResultHandler::half_experience(5), 2);
+        assert_eq!(GrindstoneResultHandler::half_experience(6), 3);
+        assert_eq!(GrindstoneResultHandler::half_experience(7), 3);
+    }
+
+    #[test]
+    fn curse_enchantments_do_not_grindstone_experience() {
+        init_vanilla_registry();
+
+        let mut curse_book = ItemStack::new(&vanilla_items::ENCHANTED_BOOK);
+        curse_book.set_enchantments(
+            &[(vanilla_enchantments::VANISHING_CURSE.key.clone(), 1)],
+            false,
+        );
+
+        assert_eq!(
+            GrindstoneResultHandler::get_experience_from_item(&curse_book),
+            0
+        );
+    }
+
+    #[test]
+    fn normal_enchantment_counts_toward_grindstone_experience() {
+        init_vanilla_registry();
+
+        let mut book = ItemStack::new(&vanilla_items::ENCHANTED_BOOK);
+        book.set_enchantments(
+            &[(vanilla_enchantments::SHARPNESS.key.clone(), 1)],
+            false,
+        );
+
+        assert!(GrindstoneResultHandler::get_experience_from_item(&book) > 0);
+    }
+
+    #[test]
+    fn taking_the_grindstone_result_clears_both_inputs() {
+        init_vanilla_registry();
+        init_behaviors();
+
+        let world_fixture = fresh_test_world("grindstone_clears_both_inputs");
+        let world = &world_fixture.world;
+        let pos = BlockPos::new(0, 64, 0);
+        insert_ready_full_chunk(world, ChunkPos::from_block_pos(pos));
+        let player = TestPlayerBuilder::new(Arc::clone(world), "Grinder", 1).build();
+
+        let input = SimpleContainer::new(2).into_shared();
+        let result = ResultContainer::new().into_shared();
+        let handler = GrindstoneResultHandler::new(
+            Arc::clone(&input),
+            Arc::clone(&result),
+            pos,
+            Arc::clone(world),
+        );
+
+        let mut book = ItemStack::new(&vanilla_items::ENCHANTED_BOOK);
+        book.set_enchantments(
+            &[(vanilla_enchantments::SHARPNESS.key.clone(), 1)],
+            false,
+        );
+        {
+            let mut locked = input.lock();
+            locked.set_item(0, book.clone());
+            locked.set_item(1, book);
+        }
+
+        let input_ref = ContainerRef::from(&input);
+        let mut guard = ContainerLockGuard::lock_all(&[input_ref])
+            .expect("grindstone input container should lock");
+        handler.on_result_taken(&mut guard, &player);
+
+        let after = guard.get(ContainerId::from_arc(&input)).expect("input locked");
+        assert!(after.get_item(0).is_empty());
+        assert!(after.get_item(1).is_empty());
     }
 }

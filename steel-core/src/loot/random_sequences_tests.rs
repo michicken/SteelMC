@@ -2,6 +2,8 @@ use super::*;
 use crate::loot::vanilla_loot_tables;
 use crate::world::World;
 use std::env::temp_dir;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use steel_utils::random::legacy_random::LegacyRandom;
 use steel_utils::{random::Random as _, saved_data::SavedDataManager};
 use tokio::runtime::Builder;
@@ -143,6 +145,39 @@ fn recursive_access_reports_an_error_without_waiting() {
         })
         .expect("outer access");
     draw(&sequences, &key);
+}
+
+#[test]
+fn held_by_other_thread_reports_retryable_error_then_draws_after_release() {
+    let sequences = RandomSequences::from_persistent(0, PersistentRandomSequences::default())
+        .expect("settings");
+    let key = Identifier::vanilla_static("contended");
+    draw(&sequences, &key); // materialize the stream
+    let source = sequences.test_sequence_source(&key);
+
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let holder_entered = Arc::clone(&entered);
+    let holder_release = Arc::clone(&release);
+    let holder = thread::spawn(move || {
+        let _guard = source.lock();
+        holder_entered.wait();
+        holder_release.wait();
+    });
+
+    entered.wait(); // holder is now holding the stream
+    let err = sequences
+        .with_random(&key, |random| Ok(random.next_i64()))
+        .expect_err("still held by the other worker");
+    assert!(matches!(err, LootError::RandomUnavailable(_)));
+
+    release.wait(); // let the holder drop its guard
+    holder.join().expect("holder joined");
+
+    let value = sequences
+        .with_random(&key, |random| Ok(random.next_i64()))
+        .expect("draw after contention cleared");
+    assert_ne!(value, 0);
 }
 
 #[test]

@@ -21,6 +21,7 @@ use crate::{
     world::World,
 };
 use rustc_hash::FxHashMap;
+use glam::DVec3;
 use simdnbt::owned::{NbtList, NbtTag};
 use steel_protocol::{
     packet_traits::{CompressionInfo, EncodedPacket},
@@ -185,7 +186,7 @@ fn add_to_empty_selected_slot_marks_inventory_changed() {
 }
 
 #[test]
-fn add_merges_into_existing_offhand_stack_before_main_inventory() {
+fn add_does_not_merge_into_existing_offhand_stack() {
     init_vanilla_registry();
 
     let mut inventory = PlayerInventory::new();
@@ -198,8 +199,12 @@ fn add_merges_into_existing_offhand_stack_before_main_inventory() {
     assert!(inventory.add(&mut stack));
 
     assert!(stack.is_empty());
-    assert_eq!(inventory.get_ref(EquipmentSlot::OffHand).count(), 64);
-    assert!(inventory.get_items().iter().all(ItemStack::is_empty));
+    // The offhand stack is left untouched; the pickup lands in the main inventory.
+    assert_eq!(inventory.get_ref(EquipmentSlot::OffHand).count(), 63);
+    assert!(inventory
+        .get_items()
+        .iter()
+        .any(|slot| slot.is(&vanilla_items::OAK_LOG)));
 }
 
 #[test]
@@ -1762,6 +1767,34 @@ fn pending_terminal_removal_preserves_drop_disposition() {
     };
     assert!(item.get_item().is(&vanilla_items::STONE));
     assert_eq!(item.get_item().count(), 2);
+}
+
+#[test]
+fn death_drop_is_retained_when_item_entity_cannot_spawn() {
+    init_vanilla_registry();
+    let world_fixture = fresh_test_world("death_drop_retained_unloaded");
+    let world = &world_fixture.world;
+    // Intentionally leave the player's chunk unloaded so item spawning fails.
+    let player = test_player(Arc::clone(world));
+    player
+        .base()
+        .set_position_local(DVec3::new(100.5, 64.0, 100.5));
+
+    player.spawn_death_drop(ItemStack::with_count(&vanilla_items::OAK_LOG, 5));
+
+    let dropped = world.get_entities_in_aabb_matching(
+        &WorldAabb::new(98.0, 62.0, 98.0, 103.0, 66.0, 103.0),
+        |entity| entity.entity_type() == &vanilla_entities::ITEM,
+    );
+    assert!(dropped.is_empty());
+
+    let inventory = player.inventory.lock();
+    let retained = inventory
+        .get_items()
+        .iter()
+        .find(|slot| slot.is(&vanilla_items::OAK_LOG));
+    let retained = retained.expect("the failed death drop should be retained in the inventory");
+    assert_eq!(retained.count(), 5);
 }
 
 #[test]

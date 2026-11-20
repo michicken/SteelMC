@@ -3,6 +3,8 @@ use std::sync::Arc;
 use glam::DVec3;
 use steel_registry::data_components::vanilla_components::STORED_ENCHANTMENTS;
 use steel_registry::{init_vanilla_registry, item_stack::ItemStack, vanilla_blocks, vanilla_items};
+use steel_utils::random::RandomSource;
+use steel_utils::random::legacy_random::LegacyRandom;
 use steel_utils::types::{GameType, UpdateFlags};
 use steel_utils::{BlockPos, BlockStateId, ChunkPos, Downcast as _};
 
@@ -247,6 +249,53 @@ fn enchanting_spends_levels_and_lapis_and_rerolls_the_seed() {
         "an enchanted item has no further offers"
     );
     assert_data_slots_match_offers(&menu);
+}
+
+#[test]
+fn consecutive_enchant_seeds_advance_from_seeded_world_stream() {
+    let (world_fixture, player, _pos, mut menu) =
+        test_table("enchant_menu_seed_stream", SEED);
+    let world = &world_fixture.world;
+    *world.loot_random.lock() = RandomSource::Legacy(LegacyRandom::from_seed(42));
+
+    place_in_table(&mut menu, &player, sword(), 0);
+    place_in_table(&mut menu, &player, lapis(), 1);
+    player.experience.lock().set_levels(FULL_POWER_LEVELS);
+    assert!(menu.click_menu_button(HIGH_OFFER_INDEX as i32, &player));
+    let first = player.experience.lock().enchantment_seed();
+
+    // Clear the enchanted result so a second sword can be offered again.
+    let slots = kind(&menu).enchant_slots.clone();
+    slots.lock().set_item(ITEM_SLOT, ItemStack::empty());
+    slots.lock().set_item(LAPIS_SLOT, ItemStack::empty());
+    place_in_table(&mut menu, &player, sword(), 2);
+    place_in_table(&mut menu, &player, lapis(), 2);
+    player.experience.lock().set_levels(FULL_POWER_LEVELS);
+    assert!(menu.click_menu_button(0, &player));
+    let second = player.experience.lock().enchantment_seed();
+
+    // Replay the same flow in a fresh world with the same loot stream seed.
+    let (other_fixture, other_player, _pos, mut other_menu) =
+        test_table("enchant_menu_seed_stream_other", SEED);
+    *other_fixture.world.loot_random.lock() =
+        RandomSource::Legacy(LegacyRandom::from_seed(42));
+    place_in_table(&mut other_menu, &other_player, sword(), 0);
+    place_in_table(&mut other_menu, &other_player, lapis(), 1);
+    other_player.experience.lock().set_levels(FULL_POWER_LEVELS);
+    assert!(other_menu.click_menu_button(HIGH_OFFER_INDEX as i32, &other_player));
+    let other_first = other_player.experience.lock().enchantment_seed();
+
+    let other_slots = kind(&other_menu).enchant_slots.clone();
+    other_slots.lock().set_item(ITEM_SLOT, ItemStack::empty());
+    other_slots.lock().set_item(LAPIS_SLOT, ItemStack::empty());
+    place_in_table(&mut other_menu, &other_player, sword(), 2);
+    place_in_table(&mut other_menu, &other_player, lapis(), 2);
+    other_player.experience.lock().set_levels(FULL_POWER_LEVELS);
+    assert!(other_menu.click_menu_button(0, &other_player));
+    let other_second = other_player.experience.lock().enchantment_seed();
+
+    assert_eq!(first, other_first);
+    assert_eq!(second, other_second);
 }
 
 #[test]

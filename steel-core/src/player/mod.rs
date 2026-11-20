@@ -973,7 +973,7 @@ impl Player {
         if !world.get_game_rule(&KEEP_INVENTORY) && self.game_mode() != GameType::Spectator {
             let drops = self.inventory.lock().take_death_drops();
             for item in drops {
-                let _ = self.spawn_dropped_item(item, true, false);
+                self.spawn_death_drop(item);
             }
 
             let reward = self.experience.lock().death_xp_reward();

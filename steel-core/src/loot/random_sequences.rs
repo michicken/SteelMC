@@ -7,6 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    thread,
 };
 
 use rustc_hash::FxHashMap;
@@ -45,6 +46,11 @@ impl Default for PersistentRandomSequences {
         }
     }
 }
+
+/// Bounded spin attempts when another world worker briefly holds a named
+/// stream. Kept small and non-blocking; re-entrant same-thread borrows fail
+/// every attempt and return immediately.
+const SEQUENCE_CONTENTION_ATTEMPTS: usize = 8;
 
 /// Saved vanilla Xoroshiro streams for one domain, using its default world's seed.
 pub(crate) struct RandomSequences {
@@ -123,18 +129,42 @@ impl RandomSequences {
                     .or_insert_with(|| Arc::new(SyncMutex::new(self.create_sequence(key)))),
             )
         });
-        // Handwritten tables may re-enter loot generation. Never wait on a stream
-        // already borrowed by that call (or another domain world worker).
-        // TODO: Coordinate shared-sequence access across world workers without
-        // turning contention into failed gameplay operations or zero signals.
-        let Some(mut random) = source.try_lock() else {
-            return Err(LootError::RandomUnavailable(
-                "named sequence is already in use",
-            ));
+        // Handwritten tables may re-enter loot generation. A re-entrant borrow
+        // from the same thread can never acquire the lock, so the bounded spin
+        // below still fails it on the first attempt. Brief holds by another
+        // world worker are retried instead of dropping the loot roll outright.
+        // TODO: Coordinate shared-sequence access across world workers with a
+        // proper queue once the entity-side death-drop retry is in place.
+        let mut random = {
+            let mut attempts = SEQUENCE_CONTENTION_ATTEMPTS;
+            loop {
+                if let Some(guard) = source.try_lock() {
+                    break guard;
+                }
+                attempts -= 1;
+                if attempts == 0 {
+                    return Err(LootError::RandomUnavailable(
+                        "named sequence is already in use",
+                    ));
+                }
+                thread::yield_now();
+            }
         };
         let result = use_random(&mut random);
         self.revision.fetch_add(1, Ordering::Release);
         result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_sequence_source(
+        &self,
+        key: &Identifier,
+    ) -> Arc<SyncMutex<RandomSource>> {
+        self.sequences
+            .read()
+            .get(key)
+            .cloned()
+            .expect("sequence exists")
     }
 
     fn pending_save(&self) -> io::Result<Option<(u64, PersistentRandomSequences)>> {

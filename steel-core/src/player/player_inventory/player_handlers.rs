@@ -1104,6 +1104,32 @@ impl Player {
         Some(entity)
     }
 
+    /// Drops one death-loot stack. If the world cannot spawn the item entity
+    /// (for example its chunk is not loaded yet), the stack is retained in the
+    /// inventory instead of being silently discarded after the inventory was
+    /// already cleared for death.
+    pub fn spawn_death_drop(&self, item: ItemStack) {
+        if item.is_empty() {
+            return;
+        }
+        if self
+            .spawn_dropped_item(item.clone(), true, false)
+            .is_some()
+        {
+            return;
+        }
+
+        let mut retained = item;
+        self.inventory.lock().add(&mut retained);
+        if !retained.is_empty() {
+            log::warn!(
+                "death item {}x{} could not spawn and did not fit in the inventory",
+                retained.item.key,
+                retained.count()
+            );
+        }
+    }
+
     /// Returns true if the player can drop items.
     ///
     /// Based on Java's `Player.canDropItems()`.
