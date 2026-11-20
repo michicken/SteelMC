@@ -61,6 +61,7 @@ pub struct ContainerRef {
     source: SharedContainer,
     owner: Option<ContainerOwner>,
     before_access: Option<ContainerAccessCallback>,
+    after_changed: Option<ContainerChangedCallback>,
 }
 
 impl<T> From<Shared<T>> for ContainerRef
@@ -75,6 +76,7 @@ where
             source: container,
             owner: None,
             before_access: None,
+            after_changed: None,
         }
     }
 }
@@ -107,6 +109,7 @@ impl From<SharedContainer> for ContainerRef {
             source: container,
             owner: None,
             before_access: None,
+            after_changed: None,
         }
     }
 }
@@ -134,6 +137,7 @@ impl ContainerRef {
                 after_changed: None,
             }),
             before_access: None,
+            after_changed: None,
         }
     }
 
@@ -157,6 +161,7 @@ impl ContainerRef {
                 after_changed: Some(after_changed),
             }),
             before_access: None,
+            after_changed: None,
         }
     }
 
@@ -164,6 +169,13 @@ impl ContainerRef {
     #[must_use]
     pub fn with_access_callback(mut self, callback: ContainerAccessCallback) -> Self {
         self.before_access = Some(callback);
+        self
+    }
+
+    /// Runs an entity-owner notification after a mutation releases container locks.
+    #[must_use]
+    pub(crate) fn with_changed_callback(mut self, callback: ContainerChangedCallback) -> Self {
+        self.after_changed = Some(callback);
         self
     }
 
@@ -340,7 +352,8 @@ impl ContainerLockGuard {
         };
         self.guards[index].1.set_item(slot, stack);
         let owner = self.sources[index].1.owner.clone();
-        self.notify_owner(owner);
+        let after_changed = self.sources[index].1.after_changed.clone();
+        self.notify_owner(owner, after_changed);
         true
     }
 
@@ -355,8 +368,10 @@ impl ContainerLockGuard {
         let index = *self.id_to_index.get(&id)?;
         let removed = self.guards.get_mut(index)?.1.remove_item(slot, amount);
         if !removed.is_empty() {
-            let owner = self.sources.get(index)?.1.owner.clone();
-            self.notify_owner(owner);
+            let source = &self.sources.get(index)?.1;
+            let owner = source.owner.clone();
+            let after_changed = source.after_changed.clone();
+            self.notify_owner(owner, after_changed);
         }
         Some(removed)
     }
@@ -370,7 +385,8 @@ impl ContainerLockGuard {
         };
         self.guards[index].1.set_changed();
         let owner = self.sources[index].1.owner.clone();
-        self.notify_owner(owner);
+        let after_changed = self.sources[index].1.after_changed.clone();
+        self.notify_owner(owner, after_changed);
         true
     }
 
@@ -387,15 +403,23 @@ impl ContainerLockGuard {
         result
     }
 
-    fn notify_owner(&mut self, owner: Option<ContainerOwner>) {
-        let Some(owner) = owner else {
+    fn notify_owner(
+        &mut self,
+        owner: Option<ContainerOwner>,
+        after_changed: Option<ContainerChangedCallback>,
+    ) {
+        if owner.is_none() && after_changed.is_none() {
             return;
-        };
-
+        }
         self.run_unlocked(|| {
-            owner.block_entity.set_changed();
-            if let Some(after_changed) = owner.after_changed {
-                after_changed();
+            if let Some(owner) = owner {
+                owner.block_entity.set_changed();
+                if let Some(callback) = owner.after_changed {
+                    callback();
+                }
+            }
+            if let Some(callback) = after_changed {
+                callback();
             }
         });
     }

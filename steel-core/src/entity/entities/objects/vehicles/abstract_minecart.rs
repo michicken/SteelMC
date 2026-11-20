@@ -289,6 +289,11 @@ pub trait AbstractMinecart: VehicleEntity + AbstractMinecartEventSource {
 
     /// Applies natural slowdown to the minecart movement.
     fn apply_natural_slowdown(&self, movement: DVec3) -> DVec3 {
+        self.minecart_natural_slowdown(movement)
+    }
+
+    /// Applies the standard non-container minecart slowdown.
+    fn minecart_natural_slowdown(&self, movement: DVec3) -> DVec3 {
         let slowdown = MinecartBehavior::slowdown_factor(self.as_abstract_minecart_event_source());
         let mut result = movement * DVec3::new(slowdown, 0.0, slowdown);
         if self.is_in_water() {
@@ -528,7 +533,6 @@ pub(crate) fn create_minecart(
     // These variants still use direct construction while their dedicated
     // inventory and command behaviors are being implemented.
     let generic_variants = [
-        &vanilla_entities::CHEST_MINECART,
         &vanilla_entities::FURNACE_MINECART,
         &vanilla_entities::HOPPER_MINECART,
         &vanilla_entities::COMMAND_BLOCK_MINECART,

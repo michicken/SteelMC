@@ -208,16 +208,34 @@ impl HopperBlockEntity {
         }
     }
 
+    pub(crate) fn container_at(world: &World, pos: BlockPos) -> Option<ContainerRef> {
+        if let Some(container) = world
+            .get_block_entity(pos)
+            .and_then(|entity| entity.container_ref())
+        {
+            return Some(container);
+        }
+        let area = WorldAabb::of_size(pos.get_center(), 1.0, 1.0, 1.0);
+        let containers: Vec<_> = world
+            .get_entities_in_aabb(&area)
+            .into_iter()
+            .filter(|entity| !entity.is_removed())
+            .filter_map(|entity| entity.container_ref())
+            .collect();
+        if containers.is_empty() {
+            return None;
+        }
+        let index = rand::random_range(0..containers.len());
+        containers.into_iter().nth(index)
+    }
+
     /// Moves at most one item into the container this hopper faces.
     fn push_one(&self, world: &Arc<World>, facing: steel_registry::blocks::properties::Direction) -> bool {
         let target_pos = self.get_block_pos().relative(facing);
         if world.get_block_state(target_pos).get_block() == &vanilla_blocks::COMPOSTER {
             return self.push_into_composter(world, target_pos);
         }
-        let Some(target_entity) = world.get_block_entity(target_pos) else {
-            return false;
-        };
-        let Some(target) = target_entity.container_ref() else {
+        let Some(target) = Self::container_at(world, target_pos) else {
             return false;
         };
         let own = self.storage.container_ref.clone();
@@ -250,10 +268,7 @@ impl HopperBlockEntity {
         if world.get_block_state(source_pos).get_block() == &vanilla_blocks::COMPOSTER {
             return self.pull_from_composter(world, source_pos);
         }
-        let Some(source_entity) = world.get_block_entity(source_pos) else {
-            return false;
-        };
-        let Some(source) = source_entity.container_ref() else {
+        let Some(source) = Self::container_at(world, source_pos) else {
             return false;
         };
         let own = self.storage.container_ref.clone();
@@ -354,6 +369,90 @@ mod tests {
         let container = SimpleContainer::new(size).into_shared();
         let reference = ContainerRef::from(&container);
         (container, reference)
+    }
+
+    #[test]
+    fn transfers_to_and_from_chest_minecart_entities() {
+        use crate::block_entity::BlockEntity as _;
+        use crate::bootstrap::init_globals;
+        use crate::entity::entities::MinecartEntity;
+        use crate::entity::{SharedEntity, next_entity_id};
+        use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
+        use glam::DVec3;
+        use steel_registry::{vanilla_blocks, vanilla_entities};
+        use steel_utils::Downcast as _;
+        use steel_utils::{BlockPos, ChunkPos, Direction, types::UpdateFlags};
+
+        init_globals();
+        let fixture = fresh_test_world("hopper_minecart_transfer");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        let pos = BlockPos::new(8, 64, 8);
+        assert!(world.set_block(
+            pos,
+            vanilla_blocks::HOPPER.default_state(),
+            UpdateFlags::UPDATE_NONE
+        ));
+        let block_entity = world.get_block_entity(pos).expect("hopper entity");
+        let hopper = block_entity
+            .downcast_ref::<super::HopperBlockEntity>()
+            .expect("hopper");
+        let cart: SharedEntity = Arc::new(MinecartEntity::new(
+            &vanilla_entities::CHEST_MINECART,
+            next_entity_id(),
+            DVec3::new(9.5, 64.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&cart))
+            .expect("loaded cart");
+        let hopper_container = hopper.container_ref().expect("hopper inventory");
+        let cart_container = cart.container_ref().expect("minecart inventory");
+        let mut guard = ContainerLockGuard::lock_all(&[&hopper_container]).expect("hopper lock");
+        assert!(guard.set_item(
+            hopper_container.container_id(),
+            0,
+            ItemStack::with_count(&vanilla_items::DIAMOND, 2)
+        ));
+        drop(guard);
+        assert!(hopper.push_one(world, Direction::East));
+        let guard = ContainerLockGuard::lock_all(&[&cart_container]).expect("cart lock");
+        assert_eq!(
+            guard
+                .get(cart_container.container_id())
+                .expect("cart")
+                .get_item(0)
+                .count(),
+            1
+        );
+        drop(guard);
+
+        let upper: SharedEntity = Arc::new(MinecartEntity::new(
+            &vanilla_entities::CHEST_MINECART,
+            next_entity_id(),
+            DVec3::new(8.5, 65.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&upper))
+            .expect("upper cart");
+        let upper_container = upper.container_ref().expect("upper inventory");
+        let mut guard = ContainerLockGuard::lock_all(&[&upper_container]).expect("upper lock");
+        assert!(guard.set_item(
+            upper_container.container_id(),
+            0,
+            ItemStack::new(&vanilla_items::IRON_INGOT)
+        ));
+        drop(guard);
+        assert!(hopper.pull_one(world));
+        let guard = ContainerLockGuard::lock_all(&[&upper_container]).expect("upper lock");
+        assert!(
+            guard
+                .get(upper_container.container_id())
+                .expect("upper")
+                .get_item(0)
+                .is_empty()
+        );
     }
 
     #[test]

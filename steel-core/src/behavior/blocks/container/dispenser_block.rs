@@ -1,7 +1,7 @@
 //! Dispenser and dropper block behavior.
 //!
 //! Parity notes:
-//! - Droppers move a whole stack into the container they face; dispensers eject items as
+//! - Droppers transfer one item into the container they face; dispensers eject items as
 //!   item entities by default.
 //! - A rising redstone edge schedules a two-game-tick delay before dispensing, matching
 //!   Vanilla's `DispenserBlock`.
@@ -45,7 +45,7 @@ use crate::entity::{Entity, SharedEntity, next_entity_id};
 use crate::inventory::container::{Container, calculate_redstone_signal_from_containers};
 use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
 use crate::inventory::menu::kinds::generic_3x3_menu;
-use crate::inventory::transfer::insert_stack;
+use crate::inventory::transfer::insert_one_item_in_slots;
 use crate::nameable::Nameable as _;
 use crate::player::Player;
 use crate::world::{SignalGetter as _, World};
@@ -246,9 +246,7 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
     };
 
     let target = if dropper {
-        world
-            .get_block_entity(pos.relative(facing))
-            .and_then(|entity| entity.container_ref())
+        crate::block_entity::entities::HopperBlockEntity::container_at(world, pos.relative(facing))
     } else {
         None
     };
@@ -387,21 +385,19 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
     }
 
     if let Some(target) = &target {
-        let leftover = insert_stack(&mut guard, target.container_id(), stack.clone());
-        if leftover.count() != stack.count() {
-            if leftover.is_empty() {
-                guard.remove_item(own_id, slot, stack.count());
-            } else {
-                guard.set_item(own_id, slot, leftover);
-            }
-            return;
+        let slots = guard
+            .get(target.container_id())
+            .and_then(|container| container.slots_for_face(facing.opposite()))
+            .map(<[usize]>::to_vec);
+        if insert_one_item_in_slots(&mut guard, target.container_id(), &stack, slots.as_deref()) {
+            guard.remove_item(own_id, slot, 1);
         }
-        // Nothing fit into the target container: fall through and eject the stack.
+        return;
     }
 
-    guard.remove_item(own_id, slot, stack.count());
+    guard.remove_item(own_id, slot, 1);
     drop(guard);
-    eject_item(world, pos, facing, stack);
+    eject_item(world, pos, facing, stack.copy_with_count(1));
 }
 
 macro_rules! impl_dispenser_block {
@@ -663,6 +659,11 @@ mod tests {
             facing_down(&vanilla_blocks::DISPENSER),
             false,
         );
+        assert!(second.world.set_block(
+            BELOW_POS,
+            vanilla_blocks::RAIL.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        ));
         set_slot(
             &second.world,
             DISPENSER_POS,
@@ -1824,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn dropper_moves_whole_stack_into_container_below() {
+    fn dropper_moves_one_item_into_container_below() {
         let fixture = fixture("dropper_transfer");
         let state = facing_down(&vanilla_blocks::DROPPER);
         place_machine(&fixture.world, state, true);
@@ -1837,8 +1838,73 @@ mod tests {
 
         DropperBlock::new(&vanilla_blocks::DROPPER).tick(state, &fixture.world, DISPENSER_POS);
 
-        assert_eq!(count_at(&fixture.world, BELOW_POS, 0), 32);
-        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
+        assert_eq!(count_at(&fixture.world, BELOW_POS, 0), 1);
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 31);
+    }
+
+    #[test]
+    fn dropper_inserts_one_item_into_chest_minecart() {
+        use crate::entity::{SharedEntity, entities::MinecartEntity, next_entity_id};
+
+        let fixture = fixture("dropper_chest_minecart");
+        let state = facing_down(&vanilla_blocks::DROPPER);
+        place_machine(&fixture.world, state, false);
+        let cart: SharedEntity = Arc::new(MinecartEntity::new(
+            &vanilla_entities::CHEST_MINECART,
+            next_entity_id(),
+            DVec3::new(0.5, -1.0, 0.5),
+            Arc::downgrade(&fixture.world),
+        ));
+        fixture
+            .world
+            .try_add_entity(Arc::clone(&cart))
+            .expect("minecart");
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::with_count(&vanilla_items::DIAMOND, 3),
+        );
+        DropperBlock::new(&vanilla_blocks::DROPPER).tick(state, &fixture.world, DISPENSER_POS);
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 2);
+        let inventory = cart.container_ref().expect("minecart inventory");
+        let guard = ContainerLockGuard::lock_all(&[&inventory]).expect("inventory");
+        assert_eq!(
+            guard
+                .get(inventory.container_id())
+                .expect("inventory")
+                .get_item(0)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dropper_keeps_its_item_when_the_destination_is_full() {
+        let fixture = fixture("dropper_full_destination");
+        let state = facing_down(&vanilla_blocks::DROPPER);
+        place_machine(&fixture.world, state, true);
+        for slot in 0..27 {
+            set_slot(
+                &fixture.world,
+                BELOW_POS,
+                slot,
+                ItemStack::with_count(&vanilla_items::STONE, 64),
+            );
+        }
+        set_slot(
+            &fixture.world,
+            DISPENSER_POS,
+            0,
+            ItemStack::new(&vanilla_items::DIRT),
+        );
+        let before = dropped_items(&fixture.world, DISPENSER_POS.get_center()).len();
+        DropperBlock::new(&vanilla_blocks::DROPPER).tick(state, &fixture.world, DISPENSER_POS);
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 1);
+        assert_eq!(
+            dropped_items(&fixture.world, DISPENSER_POS.get_center()).len(),
+            before
+        );
     }
 
     #[test]
@@ -1856,7 +1922,7 @@ mod tests {
 
         DropperBlock::new(&vanilla_blocks::DROPPER).tick(state, &fixture.world, DISPENSER_POS);
 
-        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 0);
+        assert_eq!(count_at(&fixture.world, DISPENSER_POS, 0), 7);
         assert_eq!(
             dropped_items(&fixture.world, DISPENSER_POS.get_center()).len(),
             before + 1

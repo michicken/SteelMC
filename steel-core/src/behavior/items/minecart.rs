@@ -290,42 +290,41 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_minecart_variants_pass_without_consumption_or_spawning() {
+    fn chest_and_tnt_minecart_items_spawn_their_registered_types() {
         init_globals();
 
-        for item in [
-            &vanilla_items::CHEST_MINECART,
-            &vanilla_items::FURNACE_MINECART,
-            &vanilla_items::TNT_MINECART,
-            &vanilla_items::HOPPER_MINECART,
-            &vanilla_items::COMMAND_BLOCK_MINECART,
+        for (item, entity_type) in [
+            (
+                &vanilla_items::CHEST_MINECART,
+                &vanilla_entities::CHEST_MINECART,
+            ),
+            (
+                &vanilla_items::TNT_MINECART,
+                &vanilla_entities::TNT_MINECART,
+            ),
         ] {
             let fixture = create_fixture(
-                "minecart_item_unimplemented_variant",
+                "minecart_item_registered_variants",
                 BlockPos::new(8, 64, 8),
                 &vanilla_blocks::RAIL,
                 Some(RailShape::NorthSouth),
                 GameType::Survival,
             );
-            let stack = ItemStack::new(item);
-            prepare_hand(&fixture.player, InteractionHand::MainHand, stack.clone());
-
+            prepare_hand(
+                &fixture.player,
+                InteractionHand::MainHand,
+                ItemStack::new(item),
+            );
             assert_eq!(
                 use_cart(&fixture, InteractionHand::MainHand),
-                InteractionResult::Pass,
-                "{}",
-                item.key
+                InteractionResult::Success
             );
-            assert_eq!(
-                held_stack(&fixture.player, InteractionHand::MainHand),
-                stack
-            );
+            assert!(held_stack(&fixture.player, InteractionHand::MainHand).is_empty());
             let player_id = fixture.player.id();
-            assert!(
-                entities_near(&fixture, |entity| entity.id() != player_id).is_empty(),
-                "{} should not spawn an entity",
-                item.key
-            );
+            let spawned = entities_near(&fixture, |entity| entity.id() != player_id);
+            assert_eq!(spawned.len(), 1);
+            assert_eq!(spawned[0].entity_type(), entity_type);
+            assert!(spawned[0].as_abstract_minecart().is_some());
         }
     }
 

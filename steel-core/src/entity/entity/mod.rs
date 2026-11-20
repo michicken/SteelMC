@@ -1601,6 +1601,11 @@ pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
         try_as_dyn::<Self, dyn Projectile>(self)
     }
 
+    /// Returns inventory storage owned by this entity, when available.
+    fn container_ref(&self) -> Option<crate::inventory::lock::ContainerRef> {
+        None
+    }
+
     /// Returns this entity's container-user capability.
     fn as_container_user(&self) -> Option<&dyn super::ContainerUser> {
         try_as_dyn::<Self, dyn super::ContainerUser>(self)

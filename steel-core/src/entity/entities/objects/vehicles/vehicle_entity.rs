@@ -90,6 +90,9 @@ pub trait VehicleEntity: Entity {
     /// Destroys the vehicle and drops the given item, when entity drops are enabled.
     fn vehicle_destroy_with_item(&self, world: &World, drop_item: ItemRef) {
         self.kill(world);
+        if !self.is_removed() {
+            return;
+        }
         if world.get_game_rule(&ENTITY_DROPS) {
             let mut item = ItemStack::new(drop_item);
             if let Some(name) = self.custom_name() {

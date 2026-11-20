@@ -22,6 +22,7 @@ use super::abstract_minecart::{
     AbstractMinecart, AbstractMinecartBase, minecart_relative_portal_position,
 };
 use super::minecart_behavior::MinecartBehavior;
+use super::minecart_container::MinecartContainer;
 use super::tnt_minecart::TntMinecart;
 use super::vehicle_entity::{
     VEHICLE_DIMENSION_CHANGING_DELAY, VEHICLE_HURT_DURATION_TICKS, VehicleEntity,
@@ -39,13 +40,18 @@ use crate::world::{Explosion, World};
 const ACTIVATOR_RAIL_DAMAGE: f32 = 50.0;
 
 /// A minecart entity.
-#[entity_behavior(class = "Minecart", class_alias = "MinecartTNT")]
+#[entity_behavior(
+    class = "Minecart",
+    class_alias = "MinecartTNT",
+    class_alias = "MinecartChest"
+)]
 pub struct MinecartEntity {
     base: EntityBase,
     entity_type: EntityTypeRef,
     entity_data: SyncMutex<MinecartEntityData>,
     minecart_base: AbstractMinecartBase,
     tnt: Option<Box<TntMinecart>>,
+    pub(super) chest: Option<Box<MinecartContainer>>,
 }
 
 // SAFETY: This key is owned by Steel and uniquely identifies `MinecartEntity`.
@@ -64,6 +70,15 @@ impl MinecartEntity {
             minecart_base: AbstractMinecartBase::new(),
             tnt: (entity_type == &vanilla_entities::TNT_MINECART)
                 .then(|| Box::new(TntMinecart::new())),
+            chest: (entity_type == &vanilla_entities::CHEST_MINECART)
+                .then(|| Box::new(MinecartContainer::new())),
+        }
+    }
+
+    /// Assigns the chest's deferred structure loot.
+    pub fn set_loot_table(&self, table: steel_utils::Identifier, seed: i64) {
+        if let Some(chest) = &self.chest {
+            chest.set_loot(table, seed);
         }
     }
 
@@ -77,6 +92,8 @@ impl MinecartEntity {
             minecart_base: AbstractMinecartBase::new(),
             tnt: (entity_type == &vanilla_entities::TNT_MINECART)
                 .then(|| Box::new(TntMinecart::new())),
+            chest: (entity_type == &vanilla_entities::CHEST_MINECART)
+                .then(|| Box::new(MinecartContainer::new())),
         }
     }
 }
@@ -157,15 +174,28 @@ impl AbstractMinecart for MinecartEntity {
     }
 
     fn is_rideable(&self) -> bool {
-        self.tnt.is_none()
+        self.tnt.is_none() && self.chest.is_none()
     }
 
     fn default_display_block_state(&self) -> BlockStateId {
         if self.tnt.is_some() {
             vanilla_blocks::TNT.default_state()
+        } else if self.chest.is_some() {
+            vanilla_blocks::CHEST.default_state()
         } else {
             vanilla_blocks::AIR.default_state()
         }
+    }
+
+    fn default_display_offset(&self) -> i32 {
+        if self.chest.is_some() { 8 } else { 6 }
+    }
+
+    fn apply_natural_slowdown(&self, movement: DVec3) -> DVec3 {
+        let Some(chest) = &self.chest else {
+            return self.minecart_natural_slowdown(movement);
+        };
+        chest.slowdown(self, movement)
     }
 
     fn custom_display_block(&self) -> Option<BlockStateId> {
@@ -186,12 +216,12 @@ impl AbstractMinecart for MinecartEntity {
     }
 
     fn display_offset(&self) -> i32 {
-        *self
-            .entity_data
-            .lock()
-            .abstract_minecart()
-            .id_display_offset
-            .get()
+        let data = self.entity_data.lock();
+        let minecart = data.abstract_minecart();
+        if minecart.id_custom_display_block.get().is_none() {
+            return self.default_display_offset();
+        }
+        *minecart.id_display_offset.get()
     }
 
     fn set_display_offset(&self, value: i32) {
@@ -208,6 +238,9 @@ impl AbstractMinecart for MinecartEntity {
         }
         if let Some(tnt) = &self.tnt {
             tnt.prime(self, world, None);
+            return;
+        }
+        if self.chest.is_some() {
             return;
         }
         if self.is_vehicle() {
@@ -229,6 +262,9 @@ impl Entity for MinecartEntity {
         _hand: InteractionHand,
         _location: DVec3,
     ) -> InteractionResult {
+        if let Some(chest) = &self.chest {
+            return chest.interact(self, player);
+        }
         if !self.is_rideable() || player.is_secondary_use_active() || self.is_vehicle() {
             return InteractionResult::Pass;
         }
@@ -244,6 +280,20 @@ impl Entity for MinecartEntity {
             InteractionResult::SuccessServer
         } else {
             InteractionResult::Consume
+        }
+    }
+
+    fn container_ref(&self) -> Option<crate::inventory::lock::ContainerRef> {
+        let chest = self.chest.as_ref()?;
+        let entity = self.level()?.get_entity_by_id(self.id())?;
+        Some(chest.container_ref(&entity))
+    }
+
+    fn set_removed(&self, reason: crate::entity::RemovalReason) {
+        if let Some(chest) = &self.chest {
+            chest.remove(self, reason);
+        } else {
+            self.base.set_removed(reason);
         }
     }
 
@@ -401,6 +451,9 @@ impl Entity for MinecartEntity {
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
         self.save_abstract_minecart_data(nbt);
+        if let Some(chest) = &self.chest {
+            chest.save(nbt);
+        }
         if let Some(tnt) = &self.tnt {
             tnt.save(nbt);
         }
@@ -408,6 +461,9 @@ impl Entity for MinecartEntity {
 
     fn load_additional(&self, nbt: BorrowedNbtCompoundView<'_, '_>) {
         self.load_abstract_minecart_data(nbt);
+        if let Some(chest) = &self.chest {
+            chest.load(nbt);
+        }
         if let Some(tnt) = &self.tnt {
             tnt.load(nbt);
         }
