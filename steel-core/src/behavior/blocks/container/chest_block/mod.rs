@@ -11,7 +11,9 @@ use steel_registry::{
         properties::{BlockStateProperties, BoolProperty, ChestType, EnumProperty},
     },
     sound_event::SoundEventRef,
-    sound_events, vanilla_block_entity_types, vanilla_custom_stats,
+    sound_events, vanilla_block_entity_types,
+    vanilla_block_tags::BlockTag,
+    vanilla_custom_stats,
 };
 use steel_utils::{BlockPos, BlockStateId, Direction, Downcast as _, translations};
 use text_components::TextComponent;
@@ -81,6 +83,11 @@ impl ChestBlock {
         }
     }
 
+    fn compatible(block: BlockRef, other: BlockRef) -> bool {
+        block == other
+            || (block.has_tag(&BlockTag::COPPER_CHESTS) && other.has_tag(&BlockTag::COPPER_CHESTS))
+    }
+
     fn candidate_partner_facing(
         &self,
         world: &dyn LevelReader,
@@ -88,7 +95,8 @@ impl ChestBlock {
         direction: Direction,
     ) -> Option<Direction> {
         let state = world.get_block_state(pos.relative(direction));
-        (state.get_block() == self.block && state.get_value(TYPE) == ChestType::Single)
+        (Self::compatible(self.block, state.get_block())
+            && state.get_value(TYPE) == ChestType::Single)
             .then(|| state.get_value(FACING))
     }
 
@@ -116,7 +124,7 @@ impl ChestBlock {
         if chest_type != ChestType::Single {
             let neighbor_pos = pos.relative(Self::connected_direction(state));
             let neighbor = world.get_block_state(neighbor_pos);
-            if neighbor.get_block() == state.get_block()
+            if Self::compatible(state.get_block(), neighbor.get_block())
                 && neighbor.get_value(TYPE) != ChestType::Single
                 && neighbor.get_value(TYPE) != chest_type
                 && neighbor.get_value(FACING) == state.get_value(FACING)

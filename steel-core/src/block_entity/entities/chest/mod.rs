@@ -70,6 +70,10 @@ impl ChestBlockEntity {
         (!player.is_spectator() || self.loot_table().is_none()) && self.properties.can_open(player)
     }
 
+    pub(crate) fn has_openers(&self) -> bool {
+        self.openers.has_openers()
+    }
+
     /// Reconciles the counter with live container users after a scheduled tick.
     pub fn recheck_open(&self) {
         if self.is_removed() {

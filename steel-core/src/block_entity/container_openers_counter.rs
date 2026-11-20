@@ -25,6 +25,10 @@ pub(crate) struct ContainerOpenersCounter {
 impl ContainerOpenersCounter {
     pub(crate) const CHECK_TICK_DELAY: i32 = 5;
 
+    pub(crate) fn has_openers(&self) -> bool {
+        self.state.lock().count > 0
+    }
+
     pub(crate) fn increment(&self, user: &dyn ContainerUser) -> OpenersChange {
         let interaction_range = user.container_interaction_range();
         let mut state = self.state.lock();
