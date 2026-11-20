@@ -6,10 +6,12 @@ use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
 use steel_protocol::packets::game::SoundSource;
+use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
-use steel_registry::sound_event::SoundEventRef;
-use steel_registry::vanilla_entity_data::GoatEntityData;
 use steel_registry::item_stack::ItemStack;
+use steel_registry::sound_event::SoundEventRef;
+use steel_registry::vanilla_block_tags::BlockTag;
+use steel_registry::vanilla_entity_data::GoatEntityData;
 use steel_registry::{sound_events, vanilla_attributes, vanilla_items};
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
@@ -20,7 +22,7 @@ use crate::entity::ai::goal::{
 use crate::entity::damage::DamageSource;
 use crate::entity::{
     DefaultEntityPush, Entity, EntityBase, EntityBaseLoad, EntityMovementEmission, EntityPose,
-    EntitySpawnReason, EntitySyncedData, LivingEntity, LivingEntityBase, Mob, MobBase, 
+    EntitySpawnReason, EntitySyncedData, LivingEntity, LivingEntityBase, Mob, MobBase,
     PathfinderMob, SharedEntity, SpawnRule, sync_dirty_mob_effects,
 };
 use crate::physics::MoveResult;
@@ -28,8 +30,9 @@ use crate::world::{LevelReader, World};
 
 const DEFAULT_STEP_HEIGHT: f32 = 0.6;
 const XP_REWARD: i32 = 5;
+const MIN_GOAT_SPAWN_BRIGHTNESS: u8 = 9;
 
-/// A wither skeleton: the Nether fortress melee mob and source of wither skeleton skulls.
+/// A goat.
 #[entity_behavior(class = "Goat", spawn_rule)]
 pub struct GoatEntity {
     base: EntityBase,
@@ -41,26 +44,27 @@ pub struct GoatEntity {
 
 // SAFETY: The owner-scoped type key uniquely identifies GoatEntity.
 unsafe impl DowncastType for GoatEntity {
-    const TYPE_KEY: DowncastTypeKey = DowncastTypeKey::new("steel:entity/wither_skeleton");
+    const TYPE_KEY: DowncastTypeKey = DowncastTypeKey::new("steel:entity/goat");
 }
 
 impl GoatEntity {
-    /// Vanilla `Zombie.checkGoatSpawnRules` placeholder: monsters may spawn
-    /// only when the spawn reason allows hostile natural spawning.
-    pub(crate) const SPAWN_RULE: SpawnRule = Self::check_wither_skeleton_spawn_rules;
+    pub(crate) const SPAWN_RULE: SpawnRule = Self::check_goat_spawn_rules;
 
-    /// Checks the Zombie placement predicate.
-    pub(crate) fn check_wither_skeleton_spawn_rules(
+    fn check_goat_spawn_rules(
         _entity_type: EntityTypeRef,
-        _level: &dyn LevelReader,
-        spawn_reason: EntitySpawnReason,
-        _pos: BlockPos,
+        level: &dyn LevelReader,
+        _spawn_reason: EntitySpawnReason,
+        pos: BlockPos,
         _random: &mut dyn Rng,
     ) -> bool {
-        spawn_reason.is_spawner() || matches!(spawn_reason, EntitySpawnReason::Command)
+        level
+            .get_block_state(pos.below())
+            .get_block()
+            .has_tag(&BlockTag::GOATS_SPAWNABLE_ON)
+            && level.raw_brightness(pos, 0) >= MIN_GOAT_SPAWN_BRIGHTNESS
     }
 
-    /// Creates a new zombie entity instance.
+    /// Creates a new goat entity.
     #[must_use]
     pub fn new(entity_type: EntityTypeRef, id: i32, position: DVec3, world: Weak<World>) -> Self {
         Self::new_with_base(
@@ -69,7 +73,7 @@ impl GoatEntity {
         )
     }
 
-    /// Loads a saved zombie entity.
+    /// Loads a saved goat entity.
     #[must_use]
     pub fn from_saved(entity_type: EntityTypeRef, load: EntityBaseLoad) -> Self {
         Self::new_with_base(
@@ -84,7 +88,6 @@ impl GoatEntity {
         mob_base.set_xp_reward(XP_REWARD);
         let mut entity_data = GoatEntityData::new();
         living_base.initialize_synced_data(&mut entity_data);
-        // Vanilla wither skeletons always spawn with a stone sword.
 
         {
             let mut goal_selector = mob_base.goal_selector().lock();
@@ -92,7 +95,6 @@ impl GoatEntity {
             goal_selector.add_goal(2, WaterAvoidingRandomStrollGoal::new(0.8));
             goal_selector.add_goal(8, LookAtPlayerGoal::new(8.0));
             goal_selector.add_goal(8, RandomLookAroundGoal::new());
-
         }
 
         Self {
@@ -208,7 +210,6 @@ impl LivingEntity for GoatEntity {
         Some(&sound_events::ENTITY_GOAT_DEATH)
     }
 
-
     fn server_ai_step(&self, entity: &SharedEntity) {
         Mob::mob_server_ai_step(self, entity);
     }
@@ -244,8 +245,4 @@ impl Mob for GoatEntity {
     }
 }
 
-
-
 impl PathfinderMob for GoatEntity {}
-
-

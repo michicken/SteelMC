@@ -1,24 +1,25 @@
 use std::iter::empty;
 use std::sync::Weak;
 
+use crate::inventory::equipment::EquipmentSlot;
 use glam::DVec3;
 use rand::Rng;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
 use steel_protocol::packets::game::SoundSource;
+use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
+use steel_registry::item_stack::ItemStack;
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::PiglinEntityData;
-use steel_registry::item_stack::ItemStack;
-use crate::inventory::equipment::EquipmentSlot;
-use steel_registry::{sound_events, vanilla_attributes, vanilla_items};
+use steel_registry::{sound_events, vanilla_attributes, vanilla_blocks, vanilla_items};
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
 
 use crate::entity::ai::goal::{
-    FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal,
-    NearestAttackableTargetGoal, RandomLookAroundGoal, WaterAvoidingRandomStrollGoal,
+    FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal, NearestAttackableTargetGoal,
+    RandomLookAroundGoal, WaterAvoidingRandomStrollGoal,
 };
 use crate::entity::damage::DamageSource;
 use crate::entity::{
@@ -32,7 +33,7 @@ use crate::world::{LevelReader, World};
 const DEFAULT_STEP_HEIGHT: f32 = 0.6;
 const XP_REWARD: i32 = 5;
 
-/// A wither skeleton: the Nether fortress melee mob and source of wither skeleton skulls.
+/// A piglin.
 #[entity_behavior(class = "Piglin", spawn_rule)]
 pub struct PiglinEntity {
     base: EntityBase,
@@ -44,33 +45,23 @@ pub struct PiglinEntity {
 
 // SAFETY: The owner-scoped type key uniquely identifies PiglinEntity.
 unsafe impl DowncastType for PiglinEntity {
-    const TYPE_KEY: DowncastTypeKey = DowncastTypeKey::new("steel:entity/wither_skeleton");
+    const TYPE_KEY: DowncastTypeKey = DowncastTypeKey::new("steel:entity/piglin");
 }
 
 impl PiglinEntity {
-    /// Vanilla `Zombie.checkPiglinSpawnRules` placeholder: monsters may spawn
-    /// only when the spawn reason allows hostile natural spawning.
-    pub(crate) const SPAWN_RULE: SpawnRule = Self::check_wither_skeleton_spawn_rules;
+    pub(crate) const SPAWN_RULE: SpawnRule = Self::check_piglin_spawn_rules;
 
-    /// Checks the Zombie placement predicate.
-    pub(crate) fn check_wither_skeleton_spawn_rules(
+    fn check_piglin_spawn_rules(
         _entity_type: EntityTypeRef,
-        _level: &dyn LevelReader,
-        spawn_reason: EntitySpawnReason,
-        _pos: BlockPos,
+        level: &dyn LevelReader,
+        _spawn_reason: EntitySpawnReason,
+        pos: BlockPos,
         _random: &mut dyn Rng,
     ) -> bool {
-        spawn_reason.is_spawner()
-            || matches!(
-                spawn_reason,
-                EntitySpawnReason::Natural
-                    | EntitySpawnReason::ChunkGeneration
-                    | EntitySpawnReason::Patrol
-                    | EntitySpawnReason::Reinforcement
-            )
+        level.get_block_state(pos.below()).get_block() != &vanilla_blocks::NETHER_WART_BLOCK
     }
 
-    /// Creates a new zombie entity instance.
+    /// Creates a new piglin entity.
     #[must_use]
     pub fn new(entity_type: EntityTypeRef, id: i32, position: DVec3, world: Weak<World>) -> Self {
         Self::new_with_base(
@@ -79,7 +70,7 @@ impl PiglinEntity {
         )
     }
 
-    /// Loads a saved zombie entity.
+    /// Loads a saved piglin entity.
     #[must_use]
     pub fn from_saved(entity_type: EntityTypeRef, load: EntityBaseLoad) -> Self {
         Self::new_with_base(
@@ -94,11 +85,10 @@ impl PiglinEntity {
         mob_base.set_xp_reward(XP_REWARD);
         let mut entity_data = PiglinEntityData::new();
         living_base.initialize_synced_data(&mut entity_data);
-        // Vanilla wither skeletons always spawn with a stone sword.
-        living_base
-            .equipment()
-            .lock()
-            .set(EquipmentSlot::MainHand, ItemStack::new(&vanilla_items::GOLDEN_SWORD));
+        living_base.equipment().lock().set(
+            EquipmentSlot::MainHand,
+            ItemStack::new(&vanilla_items::GOLDEN_SWORD),
+        );
 
         {
             let mut goal_selector = mob_base.goal_selector().lock();
@@ -287,5 +277,3 @@ impl Mob for PiglinEntity {
 impl Monster for PiglinEntity {}
 
 impl PathfinderMob for PiglinEntity {}
-
-

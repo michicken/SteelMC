@@ -478,4 +478,66 @@ mod tests {
             &mut rand::rng(),
         ));
     }
+    #[test]
+    fn goat_and_piglin_spawn_rules_use_their_vanilla_conditions() {
+        use crate::entity::Entity;
+        use crate::entity::entities::mobs::hostile::WitherSkeletonEntity;
+        use crate::entity::entities::{GoatEntity, PiglinEntity};
+        use std::sync::Weak;
+        use steel_utils::Downcast as _;
+
+        init_vanilla_registry();
+        let pos = BlockPos::new(0, 64, 0);
+        let mut rng = rand::rng();
+        let goat_rule = GoatEntity::SPAWN_RULE;
+        let piglin_rule = PiglinEntity::SPAWN_RULE;
+        let bright_grass = spawn_rule_level(vanilla_blocks::GRASS_BLOCK.default_state(), 9);
+        let dark_grass = spawn_rule_level(vanilla_blocks::GRASS_BLOCK.default_state(), 8);
+        let stone = spawn_rule_level(vanilla_blocks::STONE.default_state(), 15);
+        let wart = spawn_rule_level(vanilla_blocks::NETHER_WART_BLOCK.default_state(), 15);
+        assert!(goat_rule(
+            &vanilla_entities::GOAT,
+            &bright_grass,
+            EntitySpawnReason::Natural,
+            pos,
+            &mut rng
+        ));
+        assert!(!goat_rule(
+            &vanilla_entities::GOAT,
+            &dark_grass,
+            EntitySpawnReason::Natural,
+            pos,
+            &mut rng
+        ));
+        assert!(!goat_rule(
+            &vanilla_entities::GOAT,
+            &wart,
+            EntitySpawnReason::Natural,
+            pos,
+            &mut rng
+        ));
+        assert!(piglin_rule(
+            &vanilla_entities::PIGLIN,
+            &stone,
+            EntitySpawnReason::Natural,
+            pos,
+            &mut rng
+        ));
+        assert!(!piglin_rule(
+            &vanilla_entities::PIGLIN,
+            &wart,
+            EntitySpawnReason::Natural,
+            pos,
+            &mut rng
+        ));
+        let goat = GoatEntity::new(&vanilla_entities::GOAT, 1, glam::DVec3::ZERO, Weak::new());
+        let piglin =
+            PiglinEntity::new(&vanilla_entities::PIGLIN, 2, glam::DVec3::ZERO, Weak::new());
+        let goat: &dyn Entity = &goat;
+        let piglin: &dyn Entity = &piglin;
+        assert!(goat.downcast_ref::<GoatEntity>().is_some());
+        assert!(goat.downcast_ref::<WitherSkeletonEntity>().is_none());
+        assert!(piglin.downcast_ref::<PiglinEntity>().is_some());
+        assert!(piglin.downcast_ref::<WitherSkeletonEntity>().is_none());
+    }
 }
