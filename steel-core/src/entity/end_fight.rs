@@ -270,15 +270,15 @@ impl EndFightState {
 
     /// Places End gateway blocks around the exit portal after the dragon dies.
     ///
-    /// The gateway block entity currently has no public way to clear its stored
-    /// exit position, so these gateways are created with a placeholder exit and
-    /// `exact = false`; real outer-island targets are assigned by the existing
-    /// teleport transition on first use.
+    /// The gateways are created with an unassigned exit (`exit = None`,
+    /// `exact = false`), matching the vanilla delayed gateway state. The first
+    /// use runs the existing outer-island XZ search; any island shape randomness
+    /// there is seeded from the target block position, never a local RNG.
     fn spawn_end_gateways(&self, world: &Arc<World>, podium: BlockPos, y: i32) {
         let offsets: [(i32, i32); 4] = [(6, 0), (-6, 0), (0, 6), (0, -6)];
         for (dx, dz) in offsets {
             let origin = BlockPos::new(podium.x() + dx, y, podium.z() + dz);
-            let _ = world.create_end_gateway_portal(origin, origin, false);
+            let _ = world.create_end_gateway_portal(origin, None, false);
         }
     }
 }
@@ -474,6 +474,54 @@ mod tests {
         after.killed = true;
         after.tick(&world);
         assert!(after.dragon_id().is_none());
+    }
+
+    #[test]
+    fn killing_the_dragon_spawns_gateways_with_unassigned_exits() {
+        let world = end_world("gateways");
+        let mut fight = EndFightState::default();
+        fight.tick(&world);
+        assert!(!fight.is_killed());
+
+        world.on_ender_dragon_killed();
+        assert!(world.is_ender_dragon_killed());
+
+        let podium = crate::entity::entities::mobs::bosses::ender_dragon::end_podium_location(BlockPos::ZERO);
+        let portal_y = (60..80)
+            .find(|y| {
+                world
+                    .get_block_state(BlockPos::new(podium.x(), *y, podium.z()))
+                    .get_block()
+                    == vanilla_blocks::END_PORTAL.default_state().get_block()
+            })
+            .expect("return portal should exist at the podium");
+
+        let offsets: [(i32, i32); 4] = [(6, 0), (-6, 0), (0, 6), (0, -6)];
+        let mut gateways_found = 0;
+        for (dx, dz) in offsets {
+            let pos = BlockPos::new(podium.x() + dx, portal_y, podium.z() + dz);
+            if world.get_block_state(pos).get_block()
+                != vanilla_blocks::END_GATEWAY.default_state().get_block()
+            {
+                continue;
+            }
+            let block_entity = world
+                .get_block_entity(pos)
+                .expect("delayed gateway must have a block entity");
+            let gateway = block_entity
+                .downcast_ref::<crate::block_entity::entities::EndGatewayBlockEntity>()
+                .expect("block entity should be an end gateway");
+            assert_eq!(
+                gateway.exit_portal(),
+                None,
+                "post-kill gateway exit must be unassigned, not a placeholder coordinate"
+            );
+            assert!(!gateway.exact_teleport());
+            // A freshly created gateway is still in its spawning phase (`Age = 0`).
+            assert!(gateway.is_spawning());
+            gateways_found += 1;
+        }
+        assert!(gateways_found >= 1, "at least one delayed gateway must be built");
     }
 
     #[test]

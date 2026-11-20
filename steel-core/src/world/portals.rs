@@ -506,10 +506,15 @@ impl World {
     }
 
     /// Mirrors vanilla `EndGatewayFeature.place` for runtime End gateway creation.
+    ///
+    /// `exit = None` creates a gateway with its exit still unassigned; the first
+    /// use runs the outer-island XZ search and stores the resolved target. A
+    /// `Some` exit pins the gateway to that position, with `exact` selecting the
+    /// exact teleport versus a nearby surface search.
     pub(crate) fn create_end_gateway_portal(
         self: &Arc<Self>,
         origin: BlockPos,
-        exit: BlockPos,
+        exit: Option<BlockPos>,
         exact: bool,
     ) -> bool {
         for dy in -2_i32..=2 {
@@ -529,7 +534,14 @@ impl World {
                         vanilla_blocks::AIR.default_state()
                     };
 
-                    if !self.set_block(origin.offset(dx, dy, dz), state, UpdateFlags::UPDATE_ALL) {
+                    let pos = origin.offset(dx, dy, dz);
+                    // `set_block` reports an unchanged position as a failure, so a
+                    // no-op AIR-over-AIR or bedrock-over-bedrock write must be
+                    // skipped instead of aborting the whole layout.
+                    if self.get_block_state(pos) == state {
+                        continue;
+                    }
+                    if !self.set_block(pos, state, UpdateFlags::UPDATE_ALL) {
                         return false;
                     }
                 }
@@ -542,7 +554,10 @@ impl World {
         let Some(gateway) = block_entity.downcast_ref::<EndGatewayBlockEntity>() else {
             return false;
         };
-        gateway.set_exit_position(exit, exact);
+        match exit {
+            Some(position) => gateway.set_exit_position(position, exact),
+            None => gateway.clear_exit_position(),
+        }
         true
     }
 

@@ -108,7 +108,7 @@ pub(crate) fn calculate_transition(
         GatewayExitState::Missing { exact } if source_is_end => {
             let exit = find_or_create_valid_teleport_pos(world, portal_pos)?
                 .above_n(GATEWAY_HEIGHT_ABOVE_SURFACE);
-            if !world.create_end_gateway_portal(exit, portal_pos, false) {
+            if !world.create_end_gateway_portal(exit, Some(portal_pos), false) {
                 log::error!("Unable to create End gateway portal at {}", world.key);
                 return None;
             }

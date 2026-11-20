@@ -87,6 +87,18 @@ impl EndGatewayBlockEntity {
         self.set_changed();
     }
 
+    /// Clears the stored exit position, leaving the gateway in the vanilla
+    /// "exit not yet chosen" state. On first use the transition's outer-island
+    /// XZ search assigns a real target instead of teleporting to a placeholder.
+    pub fn clear_exit_position(&self) {
+        {
+            let mut gateway = self.gateway.lock();
+            gateway.exit_portal = None;
+            gateway.exact_teleport = false;
+        }
+        self.set_changed();
+    }
+
     /// Triggers vanilla gateway cooldown and broadcasts the block event.
     pub fn trigger_cooldown(&self, world: &World) {
         self.gateway.lock().teleport_cooldown = COOLDOWN_TIME;
@@ -266,6 +278,21 @@ mod tests {
         assert_eq!(gateway.gateway.lock().age, 44);
         assert_eq!(gateway.exit_portal(), Some(BlockPos::new(8, 70, 12)));
         assert!(gateway.exact_teleport());
+    }
+
+    #[test]
+    fn clear_exit_position_leaves_the_gateway_waiting_for_a_target() {
+        let gateway = gateway();
+        gateway.set_exit_position(BlockPos::new(100, 72, -32), true);
+        gateway.clear_exit_position();
+
+        assert_eq!(gateway.exit_portal(), None);
+        assert!(!gateway.exact_teleport());
+
+        let mut nbt = NbtCompound::new();
+        gateway.save_additional(&mut nbt);
+        assert!(nbt.int_array("exit_portal").is_none());
+        assert!(nbt.byte("ExactTeleport").is_none());
     }
 
     #[test]
