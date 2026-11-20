@@ -402,7 +402,7 @@ impl<N: VanillaPostNoiseStateType + NoiseSpawnTarget> ChunkGenerator for Vanilla
     fn create_biomes(&self, chunk: &Chunk) {
         let pos = chunk.pos();
         let min_y = chunk.min_y();
-        let section_count = chunk.sections().sections.len();
+        let section_count = chunk.sections().len();
 
         let chunk_x = pos.0.x;
         let chunk_z = pos.0.y;
@@ -421,7 +421,7 @@ impl<N: VanillaPostNoiseStateType + NoiseSpawnTarget> ChunkGenerator for Vanilla
         // depends on the order of biome lookups.
         for section_index in 0..section_count {
             let section_y = (min_y / 16) + section_index as i32;
-            let section = &chunk.sections().sections[section_index];
+            let section = &chunk.sections().holders()[section_index];
             let mut section_guard = section.write();
 
             for local_quart_x in 0..4i32 {
@@ -1259,9 +1259,8 @@ mod tests {
     fn self_neighbor_biome(chunk: &Chunk, quart: IVec3) -> u16 {
         let sections = chunk.sections();
         let min_quart_y = chunk.min_y() >> 2;
-        let quart_y =
-            (quart.y - min_quart_y).clamp(0, (sections.sections.len() * 4) as i32 - 1) as usize;
-        sections.sections[quart_y / 4].read().biomes.get(
+        let quart_y = (quart.y - min_quart_y).clamp(0, (sections.len() * 4) as i32 - 1) as usize;
+        sections.holders()[quart_y / 4].read().biomes.get(
             (quart.x & 3) as usize,
             quart_y % 4,
             (quart.z & 3) as usize,
@@ -1330,7 +1329,7 @@ mod tests {
                 HeightmapType::worldgen_types(),
                 chunk.min_y(),
                 chunk.height(),
-                &chunk.sections().sections,
+                chunk.sections().holders(),
             );
             let actual = chunk.heightmaps.read();
             for &heightmap_type in HeightmapType::worldgen_types() {

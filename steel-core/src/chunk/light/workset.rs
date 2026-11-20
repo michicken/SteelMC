@@ -229,7 +229,7 @@ impl LightChunkReadCache<'_> {
                 else {
                     continue;
                 };
-                let Some(section) = chunk_sections.sections.get(section_index) else {
+                let Some(section) = chunk_sections.holders().get(section_index) else {
                     continue;
                 };
                 sections.insert(cached_section, section.read());
@@ -747,13 +747,13 @@ impl LightLayerEdit<'_> {
                 else {
                     continue;
                 };
-                let Some(section) = layer_storage.sections().get(section_index) else {
+                let Some(section) = layer_storage.section_at_index(section_index) else {
                     continue;
                 };
 
                 let edit_index = edits.len();
                 edits.push(LightSectionEdit {
-                    section: copy_light_section(section),
+                    section: section.clone(),
                     dirty: false,
                 });
                 sections.insert(
@@ -781,19 +781,8 @@ impl LightLayerEdit<'_> {
         let Some(light_data) = self.chunks.get_mut_slot(target.chunk_slot) else {
             return false;
         };
-        let Some(target_section) = Self::layer_storage_mut(light_data, layer)
-            .sections_mut()
-            .get_mut(target.section_index)
-        else {
-            return false;
-        };
-
-        if *target_section == edited {
-            return false;
-        }
-
-        *target_section = edited;
-        true
+        Self::layer_storage_mut(light_data, layer)
+            .replace_section_at_index(target.section_index, edited)
     }
 
     fn set_section_slot_non_missing(&mut self, section_slot: usize) -> bool {
@@ -844,22 +833,6 @@ impl LightLayerEdit<'_> {
     }
 }
 
-fn copy_light_section(section: &LightSection) -> LightSection {
-    match section {
-        LightSection::Missing => LightSection::missing(),
-        LightSection::Visible(data) => LightSection::visible(copy_light_section_data(data)),
-        LightSection::Internal(data) => LightSection::internal(copy_light_section_data(data)),
-    }
-}
-
-fn copy_light_section_data(data: &LightSectionData) -> LightSectionData {
-    match data {
-        LightSectionData::Homogeneous(value) => LightSectionData::homogeneous(*value),
-        LightSectionData::RepeatedPlane(data) => LightSectionData::RepeatedPlane(Box::new(**data)),
-        LightSectionData::Packed(data) => LightSectionData::Packed(Box::new(**data)),
-    }
-}
-
 fn set_section_non_missing(section: &mut LightSection) {
     match section {
         LightSection::Missing => {
@@ -895,8 +868,7 @@ fn get_section_value(section: &LightSection, local_index: usize) -> u8 {
         LightSection::Missing => return 0,
         LightSection::Visible(data) | LightSection::Internal(data) => data,
     };
-    let (local_x, local_y, local_z) = local_block_coords(local_index);
-    data.get(local_x, local_y, local_z)
+    data.get_at_index(local_index)
 }
 
 fn set_section_value(section: &mut LightSection, local_index: usize, level: u8) {
@@ -904,8 +876,7 @@ fn set_section_value(section: &mut LightSection, local_index: usize, level: u8) 
         LightSection::Missing => return,
         LightSection::Visible(data) | LightSection::Internal(data) => data,
     };
-    let (local_x, local_y, local_z) = local_block_coords(local_index);
-    data.set(local_x, local_y, local_z, level);
+    data.set_at_index(local_index, level);
 }
 
 const fn section_has_light_data(section: &LightSection) -> bool {

@@ -122,6 +122,8 @@ pub struct ChunkMapGameTickTimings {
     pub tickable_count: usize,
     /// Total number of loaded chunks.
     pub total_chunks: usize,
+    /// Number of chunks retained while unloading.
+    pub unloading_chunks: usize,
     /// Scoped holder-cache activity across the world game tick.
     pub lookup_cache: GameplayChunkLookupCacheStats,
 }
@@ -895,10 +897,13 @@ impl ChunkMap {
             for z in center.y - NATURAL_SPAWN_CHUNK_RADIUS..=center.y + NATURAL_SPAWN_CHUNK_RADIUS {
                 let dz = f64::from(ChunkPos::new(first_x, z).middle_block_z()) - position.z;
                 let dz_squared = dz * dz;
-                let mask = dx_squared.iter().enumerate().fold(0_u32, |mask, (offset, &dx)| {
-                    let inside = dx + dz_squared < SPAWN_CANDIDATE_PLAYER_DISTANCE_SQUARED;
-                    mask | (u32::from(inside) << offset)
-                });
+                let mask = dx_squared
+                    .iter()
+                    .enumerate()
+                    .fold(0_u32, |mask, (offset, &dx)| {
+                        let inside = dx + dz_squared < SPAWN_CANDIDATE_PLAYER_DISTANCE_SQUARED;
+                        mask | (u32::from(inside) << offset)
+                    });
                 let aligned = u64::from(mask) << row_shift;
                 let lower = aligned as u32;
                 let upper = (aligned >> ROW_WIDTH) as u32;
@@ -1043,6 +1048,7 @@ impl ChunkMap {
             let start = Instant::now();
             self.process_unloads();
             timings.scheduling.process_unloads = start.elapsed();
+            timings.unloading_chunks = self.unloading_chunks.len();
         }
 
         timings

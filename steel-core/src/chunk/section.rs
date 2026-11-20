@@ -4,7 +4,7 @@ use std::{
     io::Cursor,
     ops::{Deref, DerefMut},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -263,8 +263,8 @@ impl Drop for SectionWriteGuard<'_> {
 /// A collection of chunk sections.
 #[derive(Debug)]
 pub struct Sections {
-    /// The sections in the collection.
-    pub sections: Box<[SectionHolder]>,
+    section_count: usize,
+    holders: OnceLock<Box<[SectionHolder]>>,
     randomly_ticking_sections: Arc<RandomTickSectionBits>,
 }
 
@@ -448,26 +448,65 @@ fn is_stable_vanilla_air(state: BlockStateId) -> bool {
 }
 
 impl Sections {
+    /// Creates sections for a chunk that still contains only air and the default biome.
+    #[must_use]
+    pub(crate) fn deferred(section_count: usize) -> Self {
+        Self {
+            section_count,
+            holders: OnceLock::new(),
+            randomly_ticking_sections: Arc::new(RandomTickSectionBits::new(section_count)),
+        }
+    }
+
     /// Creates a new `Sections` from a box of owned `ChunkSection`s.
     #[must_use]
     pub fn from_owned(sections: Box<[ChunkSection]>) -> Self {
-        let randomly_ticking_sections = Arc::new(RandomTickSectionBits::new(sections.len()));
-        let holders: Box<[SectionHolder]> = sections
-            .into_vec()
+        let mut storage = Self::deferred(sections.len());
+        storage.holders = OnceLock::from(storage.wrap_sections(sections.into_vec()));
+        storage
+    }
+
+    fn wrap_sections(
+        &self,
+        sections: impl IntoIterator<Item = ChunkSection>,
+    ) -> Box<[SectionHolder]> {
+        sections
             .into_iter()
             .enumerate()
             .map(|(section_index, section)| {
                 SectionHolder::with_random_tick_index(
                     section,
-                    Arc::clone(&randomly_ticking_sections),
+                    Arc::clone(&self.randomly_ticking_sections),
                     section_index,
                 )
             })
-            .collect();
-        Self {
-            sections: holders,
-            randomly_ticking_sections,
-        }
+            .collect()
+    }
+
+    /// Returns the configured number of sections, including deferred air.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.section_count
+    }
+
+    /// Whether the configured section range is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.section_count == 0
+    }
+
+    /// Returns section holders, creating them on first access to per-section data.
+    #[must_use]
+    pub fn holders(&self) -> &[SectionHolder] {
+        self.holders.get_or_init(|| {
+            self.wrap_sections((0..self.section_count).map(|_| ChunkSection::new_empty()))
+        })
+    }
+
+    /// Returns the materialized holders, if per-section data has been accessed.
+    #[must_use]
+    pub(crate) fn materialized(&self) -> Option<&[SectionHolder]> {
+        self.holders.get().map(Box::as_ref)
     }
 
     /// Returns the shared lock-free random-tick section index.
@@ -488,13 +527,16 @@ impl Sections {
         debug_assert!(relative_z < BlockPalette::SIZE);
 
         let section_index = relative_y / BlockPalette::SIZE;
+        if section_index >= self.section_count {
+            return None;
+        }
         let relative_y = relative_y % BlockPalette::SIZE;
-        self.sections.get(section_index).map(|section| {
-            section
+        Some(self.materialized().map_or(BlockStateId(0), |sections| {
+            sections[section_index]
                 .read()
                 .states
                 .get(relative_x, relative_y, relative_z)
-        })
+        }))
     }
 
     /// Reads an entire column at `(x, z)` across all sections into a caller-owned buffer.
@@ -506,11 +548,11 @@ impl Sections {
         debug_assert!(x < BlockPalette::SIZE);
         debug_assert!(z < BlockPalette::SIZE);
 
-        let total = self.sections.len() * 16;
+        let total = self.len() * 16;
         if buf.len() != total {
             buf.resize(total, BlockStateId::default());
         }
-        for (i, holder) in self.sections.iter().enumerate() {
+        for (i, holder) in self.holders().iter().enumerate() {
             let guard = holder.read();
             let base = i * 16;
             guard
@@ -525,9 +567,9 @@ impl Sections {
     /// Holds each section's read lock once for all 64 biome reads.
     #[must_use]
     pub fn read_all_biomes(&self) -> Box<[u16]> {
-        let total = self.sections.len() * 64;
+        let total = self.len() * 64;
         let mut biomes = vec![0u16; total];
-        for (i, holder) in self.sections.iter().enumerate() {
+        for (i, holder) in self.holders().iter().enumerate() {
             let guard = holder.read();
             let base = i * 64;
             for qy in 0..4 {
@@ -544,7 +586,7 @@ impl Sections {
     /// Visits every biome palette value in section order while holding each
     /// section's read lock once.
     pub fn for_each_biome_id(&self, mut visitor: impl FnMut(u16)) {
-        for holder in &self.sections {
+        for holder in self.holders() {
             let guard = holder.read();
             for qy in 0..4 {
                 for qz in 0..4 {
@@ -559,10 +601,14 @@ impl Sections {
     /// Returns whether each real chunk section contains no non-air blocks.
     #[must_use]
     pub fn section_emptiness_map(&self) -> Box<[bool]> {
-        self.sections
-            .iter()
-            .map(|section| section.read().is_empty())
-            .collect()
+        if let Some(sections) = self.materialized() {
+            sections
+                .iter()
+                .map(|section| section.read().is_empty())
+                .collect()
+        } else {
+            vec![true; self.section_count].into_boxed_slice()
+        }
     }
 
     /// Returns block-light source positions in `ScalableLux` section/local-index order.
@@ -572,7 +618,7 @@ impl Sections {
         let chunk_min_x = chunk_pos.0.x * BlockPalette::SIZE as i32;
         let chunk_min_z = chunk_pos.0.y * BlockPalette::SIZE as i32;
 
-        for (section_index, section) in self.sections.iter().enumerate() {
+        for (section_index, section) in self.holders().iter().enumerate() {
             let section_min_y = min_y + (section_index * BlockPalette::SIZE) as i32;
             section.read().append_block_light_sources(
                 chunk_min_x,
@@ -596,7 +642,7 @@ impl Sections {
         let mut i = 0;
         while i < blocks.len() {
             let section_idx = blocks[i].0 / DIM;
-            let mut guard = self.sections[section_idx].write();
+            let mut guard = self.holders()[section_idx].write();
             guard.states.enter_building_mode();
             let Some(cube) = guard.states.as_building_slice_mut() else {
                 unreachable!("just entered building mode")
@@ -624,7 +670,7 @@ impl Sections {
         let mut i = 0;
         while i < blocks.len() {
             let section_idx = blocks[i].1 / DIM;
-            let mut guard = self.sections[section_idx].write();
+            let mut guard = self.holders()[section_idx].write();
             guard.states.enter_building_mode();
             let Some(cube) = guard.states.as_building_slice_mut() else {
                 // enter_building_mode just transitioned to Building.
@@ -648,7 +694,7 @@ impl Sections {
         let mut i = 0;
         while i < blocks.len() {
             let section_idx = blocks[i].1 / DIM;
-            let mut guard = self.sections[section_idx].write();
+            let mut guard = self.holders()[section_idx].write();
             while i < blocks.len() && blocks[i].1 / DIM == section_idx {
                 let (x, relative_y, z, value) = blocks[i];
                 guard.set_block_state(x, relative_y % DIM, z, value);
@@ -671,7 +717,7 @@ impl Sections {
 
         let idx = relative_y / BlockPalette::SIZE;
         let relative_y = relative_y % BlockPalette::SIZE;
-        let mut guard = self.sections[idx].write();
+        let mut guard = self.holders()[idx].write();
         guard.set_block_state(relative_x, relative_y, relative_z, value);
     }
 
@@ -691,7 +737,7 @@ impl Sections {
 
         let idx = relative_y / BlockPalette::SIZE;
         let relative_y = relative_y % BlockPalette::SIZE;
-        let mut guard = self.sections[idx].write();
+        let mut guard = self.holders()[idx].write();
         guard.set_block_state_for_generation(relative_x, relative_y, relative_z, value);
     }
 }
@@ -1229,7 +1275,7 @@ mod tests {
     fn raw_bulk_writes_invalidate_stable_air_certificate_until_recount() {
         init_test_behaviors();
         let sections = Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice());
-        let holder = &sections.sections[0];
+        let holder = &sections.holders()[0];
 
         sections.write_block_batch(&[(1, 2, 3, vanilla_blocks::STONE.default_state())]);
         assert!(!entire_section_is_stable_air(&holder.read()));
@@ -1332,26 +1378,26 @@ mod tests {
         assert!(bits.is_empty());
 
         {
-            let mut section = sections.sections[64].write();
+            let mut section = sections.holders()[64].write();
             section.set_block_state(0, 0, 0, vanilla_blocks::LAVA.default_state());
         }
         assert_eq!(bits.next(0), Some(64));
 
         {
-            let mut section = sections.sections[1].write();
+            let mut section = sections.holders()[1].write();
             section.set_block_state(0, 0, 0, vanilla_blocks::LAVA.default_state());
         }
         assert_eq!(bits.next(0), Some(1));
         assert_eq!(bits.next(2), Some(64));
 
         {
-            let mut section = sections.sections[1].write();
+            let mut section = sections.holders()[1].write();
             section.set_block_state(0, 0, 0, vanilla_blocks::AIR.default_state());
         }
         assert_eq!(bits.next(0), Some(64));
 
         {
-            let mut section = sections.sections[64].write();
+            let mut section = sections.holders()[64].write();
             section.set_block_state(0, 0, 0, vanilla_blocks::AIR.default_state());
         }
         assert!(bits.is_empty());
@@ -1364,13 +1410,13 @@ mod tests {
         let bits = Arc::clone(sections.random_tick_sections());
 
         {
-            let mut section = sections.sections[0].write();
+            let mut section = sections.holders()[0].write();
             section.set_block_state_for_generation(0, 0, 0, vanilla_blocks::LAVA.default_state());
         }
         assert!(bits.is_empty());
 
         {
-            let mut section = sections.sections[0].write();
+            let mut section = sections.holders()[0].write();
             section.finalize_generation_counts_if_needed();
         }
         assert_eq!(bits.next(0), Some(0));

@@ -251,7 +251,7 @@ impl ChunkGenerator for FlatChunkGenerator {
             center_block_z: chunk_min_z + 8,
             sea_level: self.sea_level,
             min_y: chunk.min_y(),
-            height: (chunk.sections().sections.len() * 16) as i32,
+            height: (chunk.sections().len() * 16) as i32,
             layers: &self.layers,
             biome: &vanilla_biomes::PLAINS,
             template_pools: structure_generator.template_pools(),
@@ -262,10 +262,10 @@ impl ChunkGenerator for FlatChunkGenerator {
     }
 
     fn create_biomes(&self, chunk: &Chunk) {
-        let section_count = chunk.sections().sections.len();
+        let section_count = chunk.sections().len();
 
         for section_index in 0..section_count {
-            let section = &chunk.sections().sections[section_index];
+            let section = &chunk.sections().holders()[section_index];
             let mut section_guard = section.write();
 
             for local_quart_x in 0..4usize {

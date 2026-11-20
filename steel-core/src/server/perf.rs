@@ -42,7 +42,7 @@ const PROFILING_RESULTS_DIR: &str = "debug/profiling";
 const CHUNK_MAP_PHASE_COUNT: usize = 14;
 
 /// Chunk-map counters recorded for every world tick.
-const CHUNK_MAP_COUNT_COUNT: usize = 17;
+const CHUNK_MAP_COUNT_COUNT: usize = 18;
 
 /// Tracks a `/perf` run and hands back a completed recording when it ends.
 pub(crate) struct PerfRecorder {
@@ -504,6 +504,7 @@ impl ChunkMapMetrics {
             tick_block_entities,
             tickable_count,
             total_chunks,
+            unloading_chunks,
             lookup_cache,
         } = chunk_map;
 
@@ -562,6 +563,7 @@ impl ChunkMapMetrics {
             counts: [
                 ("tickable_chunks", *tickable_count),
                 ("total_chunks", *total_chunks),
+                ("unloading_chunks", *unloading_chunks),
                 ("post_process_chunks", *post_process_chunk_count),
                 ("post_process_positions", *post_process_position_count),
                 ("readiness_candidates", *readiness_candidate_count),

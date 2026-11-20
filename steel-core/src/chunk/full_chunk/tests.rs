@@ -125,7 +125,7 @@ fn random_tick_sampling_observes_tracked_and_bulk_changes() {
 
     init_vanilla_registry();
     let sections = Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice());
-    let holder = &sections.sections[0];
+    let holder = &sections.holders()[0];
     check_samples(&holder.read());
 
     sections.write_block_batch(&[
@@ -308,7 +308,7 @@ fn draining_postprocessing_marks_full_chunk_dirty() {
 
     assert!(chunk.take_postprocessing().is_some());
     assert!(chunk.common().dirty.load(Ordering::Acquire));
-    assert_eq!(chunk.postprocessing_for_serialization()[0].len(), 0);
+    assert_eq!(chunk.chunk.postprocessing_for_serialization()[0].len(), 0);
 }
 
 #[test]

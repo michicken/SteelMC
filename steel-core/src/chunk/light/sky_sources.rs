@@ -9,13 +9,25 @@ use super::{
 
 /// Per-chunk cache of the lowest skylight source edge in each X/Z column.
 ///
-/// Vanilla stores this in a 256-entry `SimpleBitStorage`. Steel keeps absolute
-/// `i32` Y values instead; the cached semantics are the same, and this avoids a
-/// new bit-storage abstraction before another system needs one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Uninitialized chunks and all-air chunks share the implicit lower source edge.
+/// Allocate per-column values only when a column has a higher source edge.
+#[derive(Debug, Clone, Eq)]
 pub struct ChunkSkyLightSources {
     min_y: i32,
-    pub(super) heightmap: [i32; CHUNK_COLUMN_COUNT],
+    heightmap: Option<Box<[i32; CHUNK_COLUMN_COUNT]>>,
+}
+
+impl PartialEq for ChunkSkyLightSources {
+    fn eq(&self, other: &Self) -> bool {
+        self.min_y == other.min_y
+            && match (&self.heightmap, &other.heightmap) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a == b,
+                (Some(columns), None) | (None, Some(columns)) => {
+                    columns.iter().all(|&height| height == self.min_y)
+                }
+            }
+    }
 }
 
 impl ChunkSkyLightSources {
@@ -28,7 +40,7 @@ impl ChunkSkyLightSources {
         let min_y = min_y - 1;
         Ok(Self {
             min_y,
-            heightmap: [min_y; CHUNK_COLUMN_COUNT],
+            heightmap: None,
         })
     }
 
@@ -47,21 +59,48 @@ impl ChunkSkyLightSources {
 
     /// Fills this cache from a chunk's sections.
     pub fn fill_from_sections(&mut self, sections: &Sections) {
-        let Some(top_section_index) = sections
-            .sections
-            .iter()
-            .rposition(|section| !section.read().is_empty())
-        else {
-            self.fill(self.min_y);
+        let Some(sections) = sections.materialized() else {
+            self.heightmap = None;
             return;
         };
+        let air = Self::air_state();
+        let mut upper_states = [air; CHUNK_COLUMN_COUNT];
+        let mut sources = [self.min_y; CHUNK_COLUMN_COUNT];
+        let mut remaining = CHUNK_COLUMN_COUNT;
 
-        for z in 0..CHUNK_EDGE {
-            for x in 0..CHUNK_EDGE {
-                let initial_edge_y = self.find_lowest_source_y(sections, top_section_index, x, z);
-                self.set(Self::index(x, z), initial_edge_y.max(self.min_y));
+        // Walk every column through the same descending edges while holding one
+        // section read lock. Empty sections reset the upper face to air.
+        for (section_index, holder) in sections.iter().enumerate().rev() {
+            let section = holder.read();
+            if section.is_empty() {
+                upper_states.fill(air);
+                continue;
+            }
+            let section_min_y =
+                Self::section_to_block_coord(self.section_y_from_index(section_index));
+            let states = section.states();
+            for (column, source) in sources.iter_mut().enumerate() {
+                if *source != self.min_y {
+                    continue;
+                }
+                let x = column % CHUNK_EDGE;
+                let z = column / CHUNK_EDGE;
+                let upper_state = &mut upper_states[column];
+                for y in (0..CHUNK_EDGE).rev() {
+                    let lower_state = states.get(x, y, z);
+                    if Self::is_edge_occluded(*upper_state, lower_state) {
+                        *source = section_min_y + y as i32 + 1;
+                        remaining -= 1;
+                        break;
+                    }
+                    *upper_state = lower_state;
+                }
+            }
+            if remaining == 0 {
+                break;
             }
         }
+        self.heightmap = (remaining < CHUNK_COLUMN_COUNT).then(|| Box::new(sources));
     }
 
     /// Updates one column after a block change.
@@ -122,56 +161,17 @@ impl ChunkSkyLightSources {
 
     /// Returns the lowest skylight source Y for a local X/Z column.
     #[must_use]
-    pub const fn get_lowest_source_y(&self, x: usize, z: usize) -> i32 {
+    pub fn get_lowest_source_y(&self, x: usize, z: usize) -> i32 {
         self.extend_sources_below_world(self.get(Self::index(x, z)))
     }
 
     /// Returns the highest cached lowest-source Y across all columns.
     #[must_use]
     pub fn get_highest_lowest_source_y(&self) -> i32 {
-        let mut max_value = NEGATIVE_INFINITY;
-        for value in self.heightmap {
-            if value > max_value {
-                max_value = value;
-            }
-        }
+        let max_value = self.heightmap.as_deref().map_or(self.min_y, |columns| {
+            columns.iter().copied().max().unwrap_or(self.min_y)
+        });
         self.extend_sources_below_world(max_value)
-    }
-
-    fn find_lowest_source_y(
-        &self,
-        sections: &Sections,
-        top_section_index: usize,
-        x: usize,
-        z: usize,
-    ) -> i32 {
-        let mut top_y =
-            Self::section_to_block_coord(self.section_y_from_index(top_section_index) + 1);
-        let mut bottom_y = top_y - 1;
-        let mut top_state = Self::air_state();
-
-        for section_index in (0..=top_section_index).rev() {
-            let section = sections.sections[section_index].read();
-            if section.is_empty() {
-                top_state = Self::air_state();
-                top_y = Self::section_to_block_coord(self.section_y_from_index(section_index));
-                bottom_y = top_y - 1;
-                continue;
-            }
-
-            for y in (0..CHUNK_EDGE).rev() {
-                let bottom_state = section.states().get(x, y, z);
-                if Self::is_edge_occluded(top_state, bottom_state) {
-                    return top_y;
-                }
-
-                top_state = bottom_state;
-                top_y = bottom_y;
-                bottom_y -= 1;
-            }
-        }
-
-        self.min_y
     }
 
     #[expect(
@@ -244,16 +244,18 @@ impl ChunkSkyLightSources {
         light_face_occludes(top_state, bottom_state, Direction::Down)
     }
 
-    fn fill(&mut self, lowest_source_y: i32) {
-        self.heightmap.fill(lowest_source_y);
+    fn set(&mut self, index: usize, value: i32) {
+        if self.heightmap.is_none() && value == self.min_y {
+            return;
+        }
+        self.heightmap
+            .get_or_insert_with(|| Box::new([self.min_y; CHUNK_COLUMN_COUNT]))[index] = value;
     }
 
-    const fn set(&mut self, index: usize, value: i32) {
-        self.heightmap[index] = value;
-    }
-
-    const fn get(&self, index: usize) -> i32 {
-        self.heightmap[index]
+    fn get(&self, index: usize) -> i32 {
+        self.heightmap
+            .as_deref()
+            .map_or(self.min_y, |columns| columns[index])
     }
 
     const fn extend_sources_below_world(&self, value: i32) -> i32 {

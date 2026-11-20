@@ -51,7 +51,7 @@ impl ChunkContents {
         };
         let mut blocks = Vec::new();
         let mut biomes = Vec::new();
-        for section in &chunk.sections.sections {
+        for section in chunk.sections.holders() {
             let section = section.read();
             for y in 0..16 {
                 for z in 0..16 {

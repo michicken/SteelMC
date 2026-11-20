@@ -503,8 +503,8 @@ impl<'a> WorldGenRegion<'a> {
         self.with_cached_chunk(chunk_x, chunk_z, ChunkStatus::Biomes, |chunk| {
             let sections = chunk.chunk.sections();
             let (section_index, local_quart_y) =
-                Self::biome_quart_y_indices(self.min_y(), sections.sections.len(), quart_y);
-            let section = &sections.sections[section_index];
+                Self::biome_quart_y_indices(self.min_y(), sections.len(), quart_y);
+            let section = &sections.holders()[section_index];
 
             section
                 .read()
@@ -868,7 +868,7 @@ impl<'a> WorldGenRegion<'a> {
             &[heightmap_type],
             proto.min_y(),
             proto.height(),
-            &proto.sections.sections,
+            proto.sections.holders(),
         );
         let Some(heightmap) = heightmaps.get(heightmap_type) else {
             panic!("heightmap {heightmap_type:?} missing after priming");
@@ -1044,7 +1044,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
             Self::record_ore_write_time(ore_profile, started_at);
             return false;
         }
-        let Some(section) = chunk.chunk.sections().sections.get(key.section_index) else {
+        let Some(section) = chunk.chunk.sections().holders().get(key.section_index) else {
             panic!(
                 "Worldgen bulk section write at ({}, {}, {}) resolved missing section index {}",
                 pos.x(),
@@ -1119,7 +1119,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
             Self::record_ore_write_time(ore_profile, started_at);
             return 0;
         }
-        let Some(section) = chunk.chunk.sections().sections.get(section_index) else {
+        let Some(section) = chunk.chunk.sections().holders().get(section_index) else {
             panic!(
                 "Worldgen bulk section write in chunk ({chunk_x}, {chunk_z}) resolved missing section index {section_index}",
             );
@@ -1243,7 +1243,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
         if !chunk.access_mode.allows_writes() {
             return None;
         }
-        chunk.chunk.sections().sections.get(section_index)
+        chunk.chunk.sections().holders().get(section_index)
     }
 
     /// Writes a block state directly to the containing section.
@@ -1266,7 +1266,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
             Self::record_ore_write_time(ore_profile, started_at);
             return true;
         }
-        let Some(section) = chunk.chunk.sections().sections.get(key.section_index) else {
+        let Some(section) = chunk.chunk.sections().holders().get(key.section_index) else {
             panic!(
                 "Worldgen bulk section write at ({}, {}, {}) resolved missing section index {}",
                 pos.x(),
@@ -1865,11 +1865,11 @@ mod tests {
         );
         assert!(old_state.is_some());
         assert_eq!(
-            chunk.sections().sections[0].read().non_empty_block_count(),
+            chunk.sections().holders()[0].read().non_empty_block_count(),
             1
         );
 
-        let mut section = chunk.sections().sections[0].write();
+        let mut section = chunk.sections().holders()[0].write();
         WorldGenBulkSectionAccess::set_bulk_block_state(&holder, &mut section, 4, 5, 6, stone);
         assert_eq!(section.non_empty_block_count(), 2);
     }

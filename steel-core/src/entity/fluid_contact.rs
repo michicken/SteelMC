@@ -340,7 +340,7 @@ fn has_fluid_and_loaded(world: &World, bounds: FluidScanBounds) -> bool {
                     .chunk_map
                     .with_full_chunk(ChunkPos::new(chunk_x, chunk_z), |chunk| {
                         let min_section_y = SectionPos::block_to_section_coord(chunk.min_y());
-                        let sections = &chunk.sections().sections;
+                        let sections = chunk.sections().holders();
                         let mut chunk_has_fluid = false;
 
                         for section_y in section_y0..=section_y1 {

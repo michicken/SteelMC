@@ -339,8 +339,8 @@ impl World {
         if let Some(Some(biome_id)) = self.chunk_map.with_full_chunk(chunk_pos, |chunk| {
             let sections = chunk.sections();
             let (section_index, local_quart_y) =
-                Self::biome_quart_y_indices(chunk.min_y(), sections.sections.len(), quart_y)?;
-            let section = sections.sections.get(section_index)?;
+                Self::biome_quart_y_indices(chunk.min_y(), sections.len(), quart_y)?;
+            let section = sections.holders().get(section_index)?;
             Some(
                 section
                     .read()

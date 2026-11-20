@@ -407,7 +407,7 @@ mod tests {
             panic!("proto chunk scheduled ticks should remain pending");
         };
         assert_eq!(fluid_ticks.len(), 1);
-        assert!(!chunk.sections.sections[0].read().is_randomly_ticking());
+        assert!(!chunk.sections.holders()[0].read().is_randomly_ticking());
     }
 
     #[test]

@@ -201,7 +201,7 @@ fn insert_active_full_holder_with_ticks(
 
 fn assert_postprocessing_drained(holder: &ChunkHolder) {
     let chunk = holder
-        .try_full_chunk()
+        .try_chunk(ChunkStatus::Full)
         .expect("the center should remain Full");
     assert!(
         chunk

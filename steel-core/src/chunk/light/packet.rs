@@ -110,7 +110,7 @@ fn prepare_chunk_section_data(
     empty_mask: &mut BitSet,
     updates: &mut Vec<Vec<u8>>,
 ) {
-    let Some(section) = storage.sections().get(section_index) else {
+    let Some(section) = storage.section_at_index(section_index) else {
         return;
     };
     let Some(data) = section.visible_data() else {
