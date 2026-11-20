@@ -536,6 +536,19 @@ impl EntityIdBlock {
         );
         part_entity_id(self.first, index)
     }
+
+    /// Releases this reserved block back to the session counter.
+    ///
+    /// Only call when none of the block's IDs have been committed to a live
+    /// entity — e.g. a spawn that failed before attachment. The counter rolls
+    /// back to [`first()`](Self::first), so the next reservation reuses this
+    /// block instead of leaking the skipped IDs.
+    pub fn release(self) {
+        let mut counter = ENTITY_COUNTER.lock();
+        if *counter > self.first {
+            *counter = self.first;
+        }
+    }
 }
 
 /// Returns the network ID a multipart mob's `index`-th sub-entity must take.

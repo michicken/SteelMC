@@ -190,6 +190,7 @@ fn monster_constructor_defaults_match_vanilla() {
         "a plain monster should keep players from resting"
     );
     assert!(monster.should_drop_experience_monster());
+    // Loot drops follow mobDrops only; player credit gates experience, not loot.
     assert_eq!(
         monster.should_drop_loot_monster(world),
         world.get_game_rule(&vanilla_game_rules::MOB_DROPS)

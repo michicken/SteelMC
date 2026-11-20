@@ -3,6 +3,17 @@ use steel_registry::data_components::vanilla_components::CUSTOM_NAME;
 use text_components::content::Content;
 
 #[test]
+fn hurt_entity_without_attached_world_does_not_panic() {
+    init_vanilla_registry();
+    // Weak::new() world: the entity has no attached level, but the damage
+    // record hook must skip silently instead of panicking on the hurt path.
+    let entity = LivingFluidTestEntity::new(0.0, 0.0, true);
+    let source = DamageSource::environment(&vanilla_damage_types::GENERIC);
+
+    assert!(entity.hurt(test_world(), &source, 4.0));
+}
+
+#[test]
 fn generic_living_hurt_applies_health_damage() {
     init_vanilla_registry();
     let entity = LivingFluidTestEntity::new_in_world(0.0, 0.0, true, test_world());

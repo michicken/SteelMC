@@ -59,3 +59,14 @@ fn concurrent_reservations_never_overlap() {
         THREADS * BLOCKS_PER_THREAD * BLOCK_SIZE as usize
     );
 }
+
+#[test]
+fn released_block_can_be_reserved_again() {
+    let block = reserve_entity_ids(3);
+    let expected_first = block.first();
+
+    // A failed spawn hands the reservation back instead of leaking the IDs.
+    block.release();
+
+    assert_eq!(next_entity_id(), expected_first);
+}

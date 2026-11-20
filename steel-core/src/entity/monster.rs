@@ -95,6 +95,9 @@ pub trait Monster: PathfinderMob + Enemy {
     }
 
     /// Allows loot when `mobDrops` is enabled, including for babies.
+    ///
+    /// Loot drops follow the mobDrops game rule only; player-credited damage
+    /// gates the experience reward, not the loot table drops (vanilla parity).
     fn should_drop_loot_monster(&self, world: &World) -> bool {
         world.get_game_rule(&MOB_DROPS)
     }

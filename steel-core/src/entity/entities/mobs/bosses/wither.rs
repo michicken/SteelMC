@@ -365,14 +365,19 @@ impl LivingEntity for WitherBossEntity {
         self.default_is_invulnerable_to(source)
     }
 
-    fn drop_custom_death_loot(&self, _source: &DamageSource, _killed_by_player: bool) {
-        let Some(world) = self.level() else {
-            return;
-        };
+    /// Boss-bar removal runs on death independent of the `MOB_DROPS` loot
+    /// gate (via [`LivingEntity::on_death_cleanup`]); loot drops stay gated.
+    fn on_death_cleanup(&self, world: &Arc<World>) {
         if *self.boss_bar_sent.lock() {
             world.broadcast_to_all(CBossEvent::remove(self.uuid()));
             *self.boss_bar_sent.lock() = false;
         }
+    }
+
+    fn drop_custom_death_loot(&self, _source: &DamageSource, _killed_by_player: bool) {
+        let Some(world) = self.level() else {
+            return;
+        };
         let drop_pos = self.position() + DVec3::new(0.0, 0.5, 0.0);
         world.spawn_item(drop_pos, ItemStack::new(&vanilla_items::NETHER_STAR));
 
@@ -393,7 +398,10 @@ impl LivingEntity for WitherBossEntity {
     }
 
     fn should_drop_loot(&self, world: &World) -> bool {
-        Monster::should_drop_loot_monster(self, world)
+        // Bosses drop their special loot regardless of who dealt the killing
+        // blow; only the mobDrops game rule gates it (unlike normal monsters,
+        // which additionally require a player-kill memory).
+        world.get_game_rule(&steel_registry::vanilla_game_rules::MOB_DROPS)
     }
 
     fn server_ai_step(&self, entity: &SharedEntity) {
@@ -508,6 +516,36 @@ mod tests {
             |entity| entity.downcast_ref::<crate::entity::entities::ItemEntity>().is_some(),
         );
         assert!(!items.is_empty(), "a real death must drop the nether star");
+    }
+
+    #[test]
+    fn boss_bar_is_removed_even_when_mob_drops_are_disabled() {
+        let world = wither_world("wither_bar_no_drops");
+        world.set_game_rule(&steel_registry::vanilla_game_rules::MOB_DROPS, false);
+
+        let wither = Arc::new(WitherBossEntity::new(
+            &vanilla_entities::WITHER,
+            next_entity_id(),
+            DVec3::new(0.5, 65.0, 0.5),
+            Arc::downgrade(&world),
+        ));
+        let entity: SharedEntity = wither.clone();
+        world.try_add_entity(Arc::clone(&entity)).expect("wither add");
+        // Simulate the boss bar having been broadcast to clients earlier.
+        *wither.boss_bar_sent.lock() = true;
+        *wither.age.lock() = super::SPAWN_INVULNERABLE_TICKS;
+
+        let source = DamageSource::environment(&vanilla_damage_types::EXPLOSION);
+        assert!(
+            wither.hurt_server(&world, &source, 400.0),
+            "damage after the spawn window must land"
+        );
+        assert!(wither.is_dead_or_dying(), "the wither must die from the hit");
+
+        assert!(
+            !*wither.boss_bar_sent.lock(),
+            "boss bar cleanup must run even when MOB_DROPS blocks loot drops"
+        );
     }
 
     #[test]

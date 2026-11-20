@@ -108,6 +108,9 @@ impl PathFinder {
                 if walked_distance >= request.max_path_length {
                     continue;
                 }
+                if neighbor_data.closed {
+                    continue;
+                }
                 if neighbor_data.in_open_set && tentative_g_score >= neighbor_data.g {
                     continue;
                 }
@@ -248,6 +251,11 @@ impl PathFinder {
         let mut hashes = Vec::new();
         let mut current_hash = closest?;
         loop {
+            // Cycle guard: a corrupted ancestor pointer must not loop the
+            // reconstruction forever; stop once a node repeats.
+            if hashes.contains(&current_hash) {
+                break;
+            }
             hashes.push(current_hash);
             let node = evaluator.node(current_hash)?;
             let Some(came_from) = node.came_from else {
@@ -323,6 +331,7 @@ struct NodeSearchData {
     walked_distance: f32,
     cost_malus: f32,
     in_open_set: bool,
+    closed: bool,
 }
 
 impl NodeSearchData {
@@ -333,6 +342,7 @@ impl NodeSearchData {
             walked_distance: node.walked_distance,
             cost_malus: node.cost_malus,
             in_open_set: node.in_open_set(),
+            closed: node.closed,
         }
     }
 }

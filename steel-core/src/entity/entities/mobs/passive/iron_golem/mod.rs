@@ -1,3 +1,4 @@
+use std::iter::empty;
 use std::sync::Weak;
 
 use glam::DVec3;
@@ -16,7 +17,8 @@ use steel_utils::nbt::NbtValueInput as _;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
 
 use crate::entity::ai::goal::{
-    FloatGoal, LookAtPlayerGoal, RandomLookAroundGoal, WaterAvoidingRandomStrollGoal,
+    FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal,
+    NearestAttackableTargetGoal, RandomLookAroundGoal, WaterAvoidingRandomStrollGoal,
 };
 use crate::entity::damage::DamageSource;
 use crate::entity::{
@@ -79,9 +81,23 @@ impl IronGolemEntity {
         {
             let mut goal_selector = mob_base.goal_selector().lock();
             goal_selector.add_goal(1, FloatGoal::new(&mob_base));
+            goal_selector.add_goal(2, MeleeAttackGoal::new(1.0, false));
             goal_selector.add_goal(3, WaterAvoidingRandomStrollGoal::new(0.5));
             goal_selector.add_goal(7, LookAtPlayerGoal::new(8.0));
             goal_selector.add_goal(8, RandomLookAroundGoal::new());
+
+            let mut target_selector = mob_base.target_selector().lock();
+            // Retaliate against whatever hurt the golem; do not alert other
+            // golems in this build.
+            target_selector.add_goal(1, HurtByTargetGoal::new().set_alert_others(empty()));
+            // Patrol golems hunt nearby monsters; players stay neutral unless
+            // the golem is provoked (handled by the hurt-by-target goal).
+            target_selector.add_goal(
+                2,
+                NearestAttackableTargetGoal::new(true, |target, _| {
+                    target.as_monster().is_some()
+                }),
+            );
         }
 
         Self {
@@ -251,4 +267,136 @@ impl Mob for IronGolemEntity {
 
 impl PathfinderMob for IronGolemEntity {}
 
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
 
+    use glam::DVec3;
+    use steel_registry::{
+        init_vanilla_registry, vanilla_blocks, vanilla_damage_types, vanilla_entities,
+    };
+    use steel_utils::{BlockPos, ChunkPos, Downcast as _};
+
+    use super::IronGolemEntity;
+    use crate::entity::entities::{PigEntity, ZombieEntity};
+    use crate::entity::damage::DamageSource;
+    use crate::entity::{Entity, LivingEntity, Mob, SharedEntity, next_entity_id};
+    use crate::test_support::{fresh_test_world, insert_ready_full_chunk, tick_test_world};
+
+    fn flat_platform(world: &crate::test_support::TestWorld) {
+        insert_ready_full_chunk(&world.world, ChunkPos::new(0, 0));
+        for x in 0..20 {
+            for z in 0..16 {
+                world.world.set_block(
+                    BlockPos::new(x, 64, z),
+                    vanilla_blocks::STONE.default_state(),
+                    steel_utils::types::UpdateFlags::UPDATE_CLIENTS,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn iron_golem_targets_and_chases_nearby_monster() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        let world_fixture = fresh_test_world("iron_golem_targets_monster");
+        let world = &world_fixture.world;
+        flat_platform(&world_fixture);
+
+        let golem: SharedEntity = Arc::new(IronGolemEntity::new(
+            &vanilla_entities::IRON_GOLEM,
+            next_entity_id(),
+            DVec3::new(8.5, 65.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&golem))
+            .expect("golem should attach to the loaded chunk");
+
+        let zombie: SharedEntity = Arc::new(ZombieEntity::new(
+            &vanilla_entities::ZOMBIE,
+            next_entity_id(),
+            DVec3::new(11.5, 65.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&zombie))
+            .expect("zombie should attach to the loaded chunk");
+
+        let golem_entity = golem
+            .downcast_ref::<IronGolemEntity>()
+            .expect("golem is concrete");
+
+        for _ in 0..40 {
+            tick_test_world(world, 1, true);
+            golem_entity.ai_step(&golem);
+            golem_entity.base_tick();
+        }
+
+        let target = golem_entity
+            .target()
+            .expect("golem must acquire the nearby zombie as a target");
+        assert_eq!(target.uuid(), zombie.uuid());
+        assert!(target.as_monster().is_some(), "target must be a monster");
+    }
+
+    #[test]
+    fn iron_golem_retaliates_against_its_attacker() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        let world_fixture = fresh_test_world("iron_golem_retaliates");
+        let world = &world_fixture.world;
+        flat_platform(&world_fixture);
+
+        let golem: SharedEntity = Arc::new(IronGolemEntity::new(
+            &vanilla_entities::IRON_GOLEM,
+            next_entity_id(),
+            DVec3::new(8.5, 65.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&golem))
+            .expect("golem should attach to the loaded chunk");
+
+        // The attacker is a passive pig, which the monster-targeting goal
+        // ignores; any retaliation target must come from the hurt-by goal.
+        let attacker: SharedEntity = Arc::new(PigEntity::new(
+            &vanilla_entities::PIG,
+            next_entity_id(),
+            DVec3::new(10.0, 65.0, 8.5),
+            Arc::downgrade(world),
+        ));
+        world
+            .try_add_entity(Arc::clone(&attacker))
+            .expect("attacker should attach to the loaded chunk");
+
+        let golem_entity = golem
+            .downcast_ref::<IronGolemEntity>()
+            .expect("golem is concrete");
+
+        // Advance the clock before the hit so the recorded attacker timestamp
+        // differs from the goal's initial zero timestamp.
+        golem_entity.advance_tick_count();
+        let source = DamageSource::direct(&vanilla_damage_types::GENERIC, attacker.clone());
+        assert!(golem_entity.hurt(world, &source, 4.0));
+
+        let hurt_by = golem_entity.last_hurt_by_mob();
+        assert!(hurt_by.is_some(), "golem must remember its attacker");
+
+        // The golem must acquire its attacker as a retaliation target on the
+        // next AI steps. The attacker here is a low-HP passive pig; the
+        // assertion only covers acquisition, not retention after the
+        // retaliation exchange (a dead target is correctly dropped later).
+        for _ in 0..5 {
+            tick_test_world(world, 1, true);
+            golem_entity.ai_step(&golem);
+            golem_entity.base_tick();
+        }
+
+        let target = golem_entity
+            .target()
+            .expect("golem must retaliate against its attacker");
+        assert_eq!(target.uuid(), attacker.uuid());
+    }
+}

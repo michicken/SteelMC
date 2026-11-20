@@ -531,12 +531,16 @@ pub trait LivingEntity: Entity {
     }
 
     /// Records a successful hit using the victim's own level clock.
+    ///
+    /// Skips recording silently when the entity has no attached level or the
+    /// server damage history has been released; the damage path must not
+    /// panic for transient / unattached entities.
     fn record_last_damage_source(&self, source: &DamageSource) {
         let Some(world) = self.level() else {
-            panic!("recording living damage requires the victim's level");
+            return;
         };
         let Some(history) = world.damage_history.upgrade() else {
-            panic!("recording living damage requires a live server damage history");
+            return;
         };
         history.record(self.base(), source, &world.game_time);
     }
@@ -1309,6 +1313,9 @@ pub trait LivingEntity: Entity {
             if source_entity.is_none_or(|entity| entity.killed_entity(&world, self_entity, source))
             {
                 self.game_event(&vanilla_game_events::ENTITY_DIE);
+                // Boss-bar removal and similar death cleanup run regardless of
+                // the MOB_DROPS loot gate; only item/XP drops are gated below.
+                self.on_death_cleanup(&world);
                 self.drop_all_death_loot(source);
                 // TODO: Create wither rose for killer
             }
@@ -1325,6 +1332,11 @@ pub trait LivingEntity: Entity {
     /// replace it: bosses playing a death animation clamp their health and enter a
     /// dying state here instead of falling over.
     fn handle_killing_blow(&self) {}
+
+    /// Death-time cleanup that must run even when the `MOB_DROPS` game rule
+    /// blocks loot drops (for example, broadcasting a boss-bar removal).
+    /// Default: no-op. Loot-specific drops stay gated by [`Self::should_drop_loot`].
+    fn on_death_cleanup(&self, _world: &Arc<World>) {}
 
     /// Returns vanilla `LivingEntity.shouldDropLoot`.
     /// Returns whether this entity should drop loot on death: not a baby,

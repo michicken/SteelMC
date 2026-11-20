@@ -109,9 +109,11 @@ impl WalkNodeEvaluator {
             .settings
             .can_stand_on_fluid(block_state.get_fluid_state())
         {
+            let max_y = context.level().max_y_exclusive();
             while self
                 .settings
                 .can_stand_on_fluid(block_state.get_fluid_state())
+                && start_y < max_y
             {
                 start_y += 1;
                 reusable_pos = BlockPos::containing(position.x, f64::from(start_y), position.z);
@@ -119,7 +121,8 @@ impl WalkNodeEvaluator {
             }
             start_y -= 1;
         } else if self.settings.can_float() && self.settings.in_water() {
-            while block_state.get_fluid_state().is_water() {
+            let max_y = context.level().max_y_exclusive();
+            while block_state.get_fluid_state().is_water() && start_y < max_y {
                 start_y += 1;
                 reusable_pos = BlockPos::containing(position.x, f64::from(start_y), position.z);
                 block_state = context.get_block_state(reusable_pos);
