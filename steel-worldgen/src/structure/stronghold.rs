@@ -686,16 +686,35 @@ pub struct StrongholdGeneratedPiece {
     pub data: StrongholdPieceData,
 }
 
+/// Maximum per-chunk stronghold layout attempts before this chunk is left without
+/// a stronghold. The portal-room roll normally succeeds on the first or second
+/// try; the cap keeps a pathological RNG sequence from hanging the worldgen thread.
+const MAX_GENERATION_TRIES: i64 = 256;
+
 /// All stronghold pieces for a chunk. Vanilla calls
 /// `setOrientation(direction)` on every stronghold piece, and threads
 /// `genDepth` through the DFS via each subclass's `createPiece` helper.
 #[must_use]
 pub fn generate_pieces(seed: i64, chunk_x: i32, chunk_z: i32) -> Vec<StrongholdGeneratedPiece> {
+    generate_pieces_bounded(seed, chunk_x, chunk_z, MAX_GENERATION_TRIES)
+}
+
+/// Bounded variant used by the generation entry point and the exhaustion tests.
+#[must_use]
+fn generate_pieces_bounded(
+    seed: i64,
+    chunk_x: i32,
+    chunk_z: i32,
+    max_tries: i64,
+) -> Vec<StrongholdGeneratedPiece> {
     let west = chunk_x * 16 + 2;
     let north = chunk_z * 16 + 2;
 
     let mut tries = 0i64;
     loop {
+        if tries >= max_tries {
+            return Vec::new();
+        }
         let mut rng = LegacyRandom::from_seed(0);
         rng.set_large_feature_seed(seed.wrapping_add(tries), chunk_x, chunk_z);
         tries += 1;
@@ -730,6 +749,9 @@ pub fn generate_pieces(seed: i64, chunk_x: i32, chunk_z: i32) -> Vec<StrongholdG
         }
 
         if s.pieces.is_empty() || !s.has_portal {
+            if tries >= max_tries {
+                return Vec::new();
+            }
             continue;
         }
 
@@ -911,5 +933,17 @@ mod tests {
             filler.data,
             StrongholdPieceData::FillerCorridor { steps: 3 }
         );
+    }
+
+    #[test]
+    fn generate_pieces_gives_up_within_the_retry_budget() {
+        // A zero-try budget exercises the exhaustion guard: the function must
+        // return an empty layout immediately instead of looping on the seed.
+        let pieces = generate_pieces_bounded(42, 0, 0, 0);
+        assert!(pieces.is_empty());
+
+        // A single-try budget also stays bounded; whatever that one roll produces
+        // is returned, but the call cannot spin past the cap.
+        let _one_try = generate_pieces_bounded(42, 0, 0, 1);
     }
 }
