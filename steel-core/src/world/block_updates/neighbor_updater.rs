@@ -204,7 +204,13 @@ impl NeighborUpdate {
                 source_block,
                 moved_by_piston,
             } => {
-                world.execute_neighbor_update(*state, *pos, source_block, *moved_by_piston);
+                world.execute_neighbor_update(
+                    *state,
+                    *pos,
+                    source_block,
+                    *moved_by_piston,
+                    None,
+                );
                 false
             }
             Self::Multi {
@@ -217,7 +223,13 @@ impl NeighborUpdate {
                 *index += 1;
                 let neighbor_pos = source_pos.relative(direction);
                 let state = world.get_block_state(neighbor_pos);
-                world.execute_neighbor_update(state, neighbor_pos, source_block, false);
+                world.execute_neighbor_update(
+                    state,
+                    neighbor_pos,
+                    source_block,
+                    false,
+                    Some(*source_pos),
+                );
                 if *index < UPDATE_ORDER.len() && Some(UPDATE_ORDER[*index]) == *skip_direction {
                     *index += 1;
                 }
@@ -236,7 +248,7 @@ impl NeighborUpdate {
             }
             Self::Simple { pos, source_block } => {
                 let state = world.get_block_state(*pos);
-                world.execute_neighbor_update(state, *pos, source_block, false);
+                world.execute_neighbor_update(state, *pos, source_block, false, None);
                 false
             }
         }

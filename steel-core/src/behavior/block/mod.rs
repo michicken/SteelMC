@@ -581,6 +581,27 @@ pub trait BlockBehavior: Send + Sync {
         // Override for redstone components, doors, etc.
     }
 
+    /// Neighbor update that additionally reports the source block position.
+    ///
+    /// Unlike [`Self::handle_neighbor_changed`], this hook knows which
+    /// neighbor changed, so directional components such as observers can
+    /// react only to the face they are watching. The default is a no-op;
+    /// existing implementations are unaffected and do not need updating.
+    #[expect(
+        unused_variables,
+        reason = "default trait implementation ignores all params"
+    )]
+    fn on_neighbor_updated(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        from_pos: BlockPos,
+        source_block: BlockRef,
+        moved_by_piston: bool,
+    ) {
+    }
+
     /// Returns whether this state is a redstone signal source.
     fn is_signal_source(&self, _state: BlockStateId, _context: SignalQueryContext) -> bool {
         false

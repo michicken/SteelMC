@@ -86,6 +86,28 @@ impl BlockBehavior for ObserverBlock {
         state
     }
 
+    fn on_neighbor_updated(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        from_pos: BlockPos,
+        _source_block: BlockRef,
+        _moved_by_piston: bool,
+    ) {
+        // Only react to a change on the watched face; neighbor updates from
+        // the other five sides must not schedule a pulse. The scheduled-tick
+        // and powered guards are shared with `update_shape` to avoid double
+        // scheduling while a pulse is already armed.
+        if state.get_value(POWERED) {
+            return;
+        }
+        if from_pos != pos.relative(state.get_value(FACING)) {
+            return;
+        }
+        self.start_signal(world, pos, state);
+    }
+
     fn tick(&self, state: BlockStateId, world: &Arc<World>, pos: BlockPos) {
         if state.get_value(POWERED) {
             world.set_block(
@@ -327,5 +349,117 @@ mod tests {
                 "{name}: two facing observers must keep toggling for 200gt, got {flips} flips"
             );
         }
+    }
+
+    #[test]
+    fn observer_pulses_once_on_front_container_neighbor_update() {
+        use std::sync::Arc;
+
+        use steel_utils::ChunkPos;
+        use steel_utils::types::UpdateFlags;
+
+        use crate::test_support::{
+            fresh_test_world, insert_ready_full_chunk, tick_test_world,
+        };
+
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let fixture = fresh_test_world("observer_front_container");
+        let world: &Arc<World> = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let observer_pos = BlockPos::new(8, 64, 8);
+        let front_pos = observer_pos.east();
+        // Place the watched container first so its placement shape updates
+        // cannot arm the observer; the observer is installed afterwards.
+        world.set_block(
+            front_pos,
+            vanilla_blocks::CHEST.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        );
+        world.set_block(
+            observer_pos,
+            observer_state(Direction::East, false),
+            UpdateFlags::UPDATE_NONE,
+        );
+        assert!(
+            !world.has_scheduled_block_tick(observer_pos, &vanilla_blocks::OBSERVER),
+            "setup must not already arm the observer"
+        );
+
+        // The chest's inventory changed but its block state did not: only a
+        // neighbor update originates from the watched face.
+        world.update_neighbors_at(front_pos, &vanilla_blocks::CHEST);
+
+        let mut last = world.get_block_state(observer_pos).get_value(POWERED);
+        let mut pulses = 0;
+        for _ in 0..8 {
+            tick_test_world(world, 1, true);
+            let now = world.get_block_state(observer_pos).get_value(POWERED);
+            if now && !last {
+                pulses += 1;
+            }
+            last = now;
+        }
+        assert_eq!(
+            pulses, 1,
+            "a neighbor update from the watched container must produce exactly one pulse"
+        );
+    }
+
+    #[test]
+    fn observer_ignores_neighbor_updates_from_behind_and_side() {
+        use std::sync::Arc;
+
+        use steel_utils::ChunkPos;
+        use steel_utils::types::UpdateFlags;
+
+        use crate::test_support::{
+            fresh_test_world, insert_ready_full_chunk, tick_test_world,
+        };
+
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        crate::block_entity::init_block_entities();
+
+        let fixture = fresh_test_world("observer_rear_side_updates");
+        let world: &Arc<World> = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let observer_pos = BlockPos::new(8, 64, 8);
+        let behind_pos = observer_pos.west();
+        let side_pos = observer_pos.north();
+        world.set_block(behind_pos, vanilla_blocks::STONE.default_state(), UpdateFlags::UPDATE_NONE);
+        world.set_block(side_pos, vanilla_blocks::STONE.default_state(), UpdateFlags::UPDATE_NONE);
+        world.set_block(
+            observer_pos,
+            observer_state(Direction::East, false),
+            UpdateFlags::UPDATE_NONE,
+        );
+        assert!(
+            !world.has_scheduled_block_tick(observer_pos, &vanilla_blocks::OBSERVER),
+            "setup must not already arm the observer"
+        );
+
+        // Updates from the rear face and the side face must not arm the observer.
+        world.update_neighbors_at(behind_pos, &vanilla_blocks::STONE);
+        world.update_neighbors_at(side_pos, &vanilla_blocks::STONE);
+
+        let mut last = world.get_block_state(observer_pos).get_value(POWERED);
+        let mut pulses = 0;
+        for _ in 0..8 {
+            tick_test_world(world, 1, true);
+            let now = world.get_block_state(observer_pos).get_value(POWERED);
+            if now && !last {
+                pulses += 1;
+            }
+            last = now;
+        }
+        assert_eq!(
+            pulses, 0,
+            "neighbor updates from non-watched faces must not pulse the observer"
+        );
     }
 }

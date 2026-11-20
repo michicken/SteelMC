@@ -662,6 +662,7 @@ impl World {
         pos: BlockPos,
         source_block: BlockRef,
         moved_by_piston: bool,
+        from_pos: Option<BlockPos>,
     ) {
         if !self.is_in_valid_bounds(pos) {
             return;
@@ -669,6 +670,16 @@ impl World {
         let block_behaviors = &*BLOCK_BEHAVIORS;
         let behavior = block_behaviors.get_behavior(state.get_block());
         behavior.handle_neighbor_changed(state, self, pos, source_block, moved_by_piston);
+        if let Some(from_pos) = from_pos {
+            behavior.on_neighbor_updated(
+                state,
+                self,
+                pos,
+                from_pos,
+                source_block,
+                moved_by_piston,
+            );
+        }
     }
 
     pub(super) const fn chunk_pos_for_block(pos: BlockPos) -> ChunkPos {
