@@ -240,12 +240,32 @@ impl Beardifier {
         for rigid in &self.rigids {
             let bb = &rigid.bounding_box;
 
+            // The gaussian kernel is zero outside ±12 blocks, so skip pieces whose
+            // expanded box cannot contain this point before computing distances.
+            if block_x < bb.min_x() - KERNEL_RADIUS
+                || block_x > bb.max_x() + KERNEL_RADIUS
+                || block_z < bb.min_z() - KERNEL_RADIUS
+                || block_z > bb.max_z() + KERNEL_RADIUS
+            {
+                continue;
+            }
+
             // Horizontal distance to closest edge of bounding box (0 if inside)
             let dx = 0.max((bb.min_x() - block_x).max(block_x - bb.max_x()));
             let dz = 0.max((bb.min_z() - block_z).max(block_z - bb.max_z()));
 
             let ground_y = bb.min_y() + rigid.ground_level_delta;
             let dy_to_ground = block_y - ground_y;
+
+            // Bury/Encapsulate use a radius-6 kernel (radius 12 after scaling);
+            // BeardThin also passes dy_to_ground as the kernel offset. BeardBox
+            // can be non-zero anywhere inside its vertical span, so only prune
+            // when the point is vertically outside the expanded box.
+            if !matches!(rigid.terrain_adjustment, TerrainAdjustment::BeardBox)
+                && dy_to_ground.abs() > KERNEL_RADIUS
+            {
+                continue;
+            }
 
             match rigid.terrain_adjustment {
                 TerrainAdjustment::None => {}
@@ -272,6 +292,9 @@ impl Beardifier {
             let dx = block_x - junction.source_pos.x;
             let dy = block_y - junction.source_pos.y;
             let dz = block_z - junction.source_pos.z;
+            if dx.abs() > KERNEL_RADIUS || dy.abs() > KERNEL_RADIUS || dz.abs() > KERNEL_RADIUS {
+                continue;
+            }
             value += get_beard_contribution(dx, dy, dz, dy) * 0.4;
         }
 

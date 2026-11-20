@@ -1861,7 +1861,11 @@ impl WorldEntityManager {
 
             // Vanilla deliberately has no same-tick de-duplication here. A relationship change
             // may make an entity tick once as a passenger and once from its later root-list slot.
-            self.tick_non_passenger(&entity, &mut dirty_chunks);
+            self.tick_non_passenger(
+                &entity,
+                tick_context.manager_chunk.is_some(),
+                &mut dirty_chunks,
+            );
         }
         dirty_chunks
     }
@@ -2055,11 +2059,16 @@ impl WorldEntityManager {
         }
     }
 
-    fn tick_non_passenger(&self, entity: &SharedEntity, dirty_chunks: &mut FxHashSet<ChunkPos>) {
+    fn tick_non_passenger(
+        &self,
+        entity: &SharedEntity,
+        manager_owned: bool,
+        dirty_chunks: &mut FxHashSet<ChunkPos>,
+    ) {
         snapshot_old_pos_and_rot_for_tick(entity.as_ref());
         entity.advance_tick_count();
         Arc::clone(entity).tick();
-        self.mark_dirty_after_tick(entity, dirty_chunks);
+        self.mark_dirty_after_tick_known(entity, manager_owned, dirty_chunks);
         self.tick_vehicle_passengers(entity.as_ref(), dirty_chunks);
     }
 
@@ -2077,7 +2086,20 @@ impl WorldEntityManager {
     }
 
     fn mark_dirty_after_tick(&self, entity: &SharedEntity, dirty_chunks: &mut FxHashSet<ChunkPos>) {
-        if self.live_manager_owned_entity_chunk(entity.id()).is_some() {
+        self.mark_dirty_after_tick_known(
+            entity,
+            self.live_manager_owned_entity_chunk(entity.id()).is_some(),
+            dirty_chunks,
+        );
+    }
+
+    fn mark_dirty_after_tick_known(
+        &self,
+        entity: &SharedEntity,
+        manager_owned: bool,
+        dirty_chunks: &mut FxHashSet<ChunkPos>,
+    ) {
+        if manager_owned {
             dirty_chunks.insert(ChunkPos::from_entity_pos(entity.position()));
         }
     }

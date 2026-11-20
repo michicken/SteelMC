@@ -213,7 +213,7 @@ fn proto_postprocessing_roundtrips_through_persistent_chunk() {
     );
     let loaded_proto = loaded.chunk;
 
-    assert_eq!(loaded_proto.postprocessing.lock()[0], vec![packed]);
+    assert_eq!(loaded_proto.postprocessing_for_serialization()[0], vec![packed]);
 }
 
 #[test]
@@ -353,6 +353,7 @@ fn chunk_save_refuses_a_section_palette_that_lost_a_block() {
     let sand = vanilla_blocks::SAND.default_state();
     let mut cube = Box::new([[[BlockStateId::default(); 16]; 16]; 16]);
     cube[0][0][1] = stone;
+    cube[0][0][2] = vanilla_blocks::DIRT.default_state();
     let mut states = PalettedContainer::from_cube(cube);
     states.set_without_palette_for_test(0, 0, 0, sand);
     let mut section = ChunkSection::new_with_biomes(

@@ -855,6 +855,7 @@ fn copy_light_section(section: &LightSection) -> LightSection {
 fn copy_light_section_data(data: &LightSectionData) -> LightSectionData {
     match data {
         LightSectionData::Homogeneous(value) => LightSectionData::homogeneous(*value),
+        LightSectionData::RepeatedPlane(data) => LightSectionData::RepeatedPlane(Box::new(**data)),
         LightSectionData::Packed(data) => LightSectionData::Packed(Box::new(**data)),
     }
 }
@@ -939,17 +940,11 @@ fn extrude_lower_row(section: &mut LightSection, row: Option<&[u8; 16 * 16]>) {
         return;
     };
 
-    if matches!(section, LightSection::Missing) {
-        *section = LightSection::visible(LightSectionData::homogeneous(0));
-    }
-
-    for y in 0..16 {
-        for z in 0..16 {
-            for x in 0..16 {
-                set_section_value(section, x | (z << 4) | (y << 8), row[z * 16 + x]);
-            }
-        }
-    }
+    let data = LightSectionData::from_repeated_plane(row);
+    *section = match section {
+        LightSection::Internal(_) => LightSection::internal(data),
+        LightSection::Missing | LightSection::Visible(_) => LightSection::visible(data),
+    };
 }
 
 #[cfg(test)]

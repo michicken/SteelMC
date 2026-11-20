@@ -1,8 +1,11 @@
 use super::super::instrumentation::OreFeatureProfile;
 use super::super::prelude::*;
 use super::super::runner::FeatureDecorationRunner;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::f32::consts::PI;
+use std::sync::Arc;
 use std::time::Instant;
 use steel_math::{round_f32, trig};
 use steel_utils::PackedSectionBlockPos;
@@ -122,7 +125,7 @@ impl FeatureDecorationRunner {
         let profile = OreFeatureProfile::new(config.size);
         let mut placed = 0_u64;
         let mut tested = OreTestedPositions::with_capacity(search_volume.tested_position_count);
-        let targets = ResolvedOreTargets::from_config(registry, config);
+        let targets = resolved_targets(registry, config);
         let batch_no_air_exposure = config.discard_chance_on_air_exposure <= 0.0;
         let mut pending_no_air_sections = SmallVec::<[PendingOreSection; 8]>::new();
         let min_y = region.min_y();
@@ -243,6 +246,19 @@ impl FeatureDecorationRunner {
                 continue;
             }
 
+            let squared_distances = |min: i32, max: i32, center: f64| {
+                (min..=max)
+                    .map(|coordinate| {
+                        let distance = (f64::from(coordinate) + 0.5 - center) / radius;
+                        distance * distance
+                    })
+                    .collect::<SmallVec<[f64; 32]>>()
+            };
+            // Reuse the exact Java divisions across the outer axes. Keep the
+            // candidate traversal and floating point comparisons unchanged.
+            let y_distances = squared_distances(y_min, y_max, node[1]);
+            let z_distances = squared_distances(z_min, z_max, node[2]);
+
             for x in x_min..=x_max {
                 let x_offset = i64::from(x) - i64::from(x_start);
                 let x_distance = (f64::from(x) + 0.5 - node[0]) / radius;
@@ -251,20 +267,18 @@ impl FeatureDecorationRunner {
                     continue;
                 }
 
-                for y in y_min..=y_max {
+                for (y, &y_distance_squared) in (y_min..=y_max).zip(&y_distances) {
                     let y_offset = i64::from(y) - i64::from(y_start);
-                    let y_distance = (f64::from(y) + 0.5 - node[1]) / radius;
-                    let x_y_distance_squared = x_distance_squared + y_distance * y_distance;
+                    let x_y_distance_squared = x_distance_squared + y_distance_squared;
                     if x_y_distance_squared >= 1.0 {
                         continue;
                     }
 
-                    for z in z_min..=z_max {
-                        let z_offset = i64::from(z) - i64::from(z_start);
-                        let z_distance = (f64::from(z) + 0.5 - node[2]) / radius;
-                        if x_y_distance_squared + z_distance * z_distance >= 1.0 {
+                    for (z, &z_distance_squared) in (z_min..=z_max).zip(&z_distances) {
+                        if x_y_distance_squared + z_distance_squared >= 1.0 {
                             continue;
                         }
+                        let z_offset = i64::from(z) - i64::from(z_start);
 
                         if PROFILE {
                             sections.record_ore_candidate_position();
@@ -328,7 +342,7 @@ impl FeatureDecorationRunner {
             config.size
         );
 
-        let targets = ResolvedOreTargets::from_config(registry, config);
+        let targets = resolved_targets(registry, config);
         let tries = random.next_i32_bounded(config.size + 1);
         for i in 0..tries {
             let max_distance = i.min(7);
@@ -553,6 +567,25 @@ impl OreSearchVolume {
         let index = x_offset + y_offset * self.size_xz + z_offset * self.size_xz_y;
         usize::try_from(index).ok()
     }
+}
+
+thread_local! {
+    /// Ore configurations are registry-owned and immutable, so resolve their target
+    /// matchers once per thread instead of rebuilding tags for every vein.
+    static RESOLVED_ORE_TARGETS: RefCell<FxHashMap<usize, Arc<ResolvedOreTargets>>> =
+        RefCell::new(FxHashMap::default());
+}
+
+fn resolved_targets(registry: &Registry, config: &OreConfiguration) -> Arc<ResolvedOreTargets> {
+    let key = config as *const OreConfiguration as usize;
+    if let Some(existing) = RESOLVED_ORE_TARGETS.with(|cache| cache.borrow().get(&key).cloned()) {
+        return existing;
+    }
+    let resolved = Arc::new(ResolvedOreTargets::from_config(registry, config));
+    RESOLVED_ORE_TARGETS.with(|cache| {
+        cache.borrow_mut().insert(key, Arc::clone(&resolved));
+    });
+    resolved
 }
 
 impl ResolvedOreTargets {

@@ -870,48 +870,62 @@ impl ChunkMap {
     /// player, and `collectSpawningChunks` still requires the chunk center to be
     /// within 128 blocks of that player.
     fn tick_spawning_chunks(&self, world: &World) {
-        let mut player_positions = Vec::new();
+        // Use one mask for each aligned row of 32 chunks. Players sharing a
+        // base can overlap almost their entire radius; merging rows avoids
+        // hashing each candidate once per nearby player.
+        const ROW_WIDTH: i32 = u32::BITS as i32;
+        const SPAWN_DIAMETER: usize = (2 * NATURAL_SPAWN_CHUNK_RADIUS + 1) as usize;
+        let mut coverage = FxHashMap::<(i32, i32), u32>::default();
         world.players.iter_players(|_, player| {
-            if !player.is_spectator() {
-                player_positions.push(player.position());
+            if player.is_spectator() {
+                return true;
+            }
+
+            let position = player.position();
+            let ChunkPos(center) = ChunkPos::from_entity_pos(position);
+            let first_x = center.x - NATURAL_SPAWN_CHUNK_RADIUS;
+            let row_x = first_x.div_euclid(ROW_WIDTH);
+            let row_shift = first_x.rem_euclid(ROW_WIDTH);
+            let dx_squared: [f64; SPAWN_DIAMETER] = std::array::from_fn(|offset| {
+                let x = first_x + offset as i32;
+                let dx = f64::from(ChunkPos::new(x, center.y).middle_block_x()) - position.x;
+                dx * dx
+            });
+
+            for z in center.y - NATURAL_SPAWN_CHUNK_RADIUS..=center.y + NATURAL_SPAWN_CHUNK_RADIUS {
+                let dz = f64::from(ChunkPos::new(first_x, z).middle_block_z()) - position.z;
+                let dz_squared = dz * dz;
+                let mask = dx_squared.iter().enumerate().fold(0_u32, |mask, (offset, &dx)| {
+                    let inside = dx + dz_squared < SPAWN_CANDIDATE_PLAYER_DISTANCE_SQUARED;
+                    mask | (u32::from(inside) << offset)
+                });
+                let aligned = u64::from(mask) << row_shift;
+                let lower = aligned as u32;
+                let upper = (aligned >> ROW_WIDTH) as u32;
+                if lower != 0 {
+                    *coverage.entry((row_x, z)).or_default() |= lower;
+                }
+                if upper != 0 {
+                    *coverage.entry((row_x + 1, z)).or_default() |= upper;
+                }
             }
             true
         });
-        // The radius square bounds every chunk within spawn distance, so checking
-        // distance against the producing player yields the full spawning set.
-        // The set dedups chunks near several players so each ticks once.
-        let mut spawning_chunks = FxHashSet::default();
-        for &position in &player_positions {
-            let ChunkPos(center) = ChunkPos::from_entity_pos(position);
-            for x in center.x - NATURAL_SPAWN_CHUNK_RADIUS..=center.x + NATURAL_SPAWN_CHUNK_RADIUS {
-                for z in
-                    center.y - NATURAL_SPAWN_CHUNK_RADIUS..=center.y + NATURAL_SPAWN_CHUNK_RADIUS
-                {
-                    let pos = ChunkPos::new(x, z);
-                    let delta_x = f64::from(pos.middle_block_x()) - position.x;
-                    let delta_z = f64::from(pos.middle_block_z()) - position.z;
-                    if delta_x * delta_x + delta_z * delta_z
-                        < SPAWN_CANDIDATE_PLAYER_DISTANCE_SQUARED
-                        && spawning_chunks.insert(pos)
-                    {
-                        self.tick_spawning_chunk(pos);
-                    }
-                }
-            }
-        }
-    }
 
-    fn tick_spawning_chunk(&self, pos: ChunkPos) {
-        let Some(holder) = self.chunks.read_sync(&pos, |_, holder| Arc::clone(holder)) else {
-            return;
-        };
-        if !is_block_ticking(holder.load_level())
-            || !holder.ticking_readiness_snapshot().is_block_ticking()
-        {
-            return;
-        }
-        if let Some(chunk) = holder.try_full_chunk() {
-            chunk.common().increment_inhabited_time();
+        for ((row_x, z), mut mask) in coverage {
+            while mask != 0 {
+                let x = row_x * ROW_WIDTH + mask.trailing_zeros() as i32;
+                mask &= mask - 1;
+                let pos = ChunkPos::new(x, z);
+                let _ = self.chunks.read_sync(&pos, |_, holder| {
+                    if is_block_ticking(holder.load_level())
+                        && holder.ticking_readiness_snapshot().is_block_ticking()
+                        && let Some(chunk) = holder.try_full_chunk()
+                    {
+                        chunk.common().increment_inhabited_time();
+                    }
+                });
+            }
         }
     }
 

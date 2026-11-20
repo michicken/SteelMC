@@ -671,11 +671,7 @@ impl ChunkStorage {
         // Collect POI occupancy data from world storage
         let pois = full.map_or_default(|full| Self::pois_to_persistent(full, pos));
 
-        let postprocessing = if let Some(full) = full {
-            full.postprocessing_for_serialization()
-        } else {
-            chunk.postprocessing.lock().iter().map(Vec::clone).collect()
-        };
+        let postprocessing = chunk.postprocessing_for_serialization();
 
         let persistent = Self::to_persistent(
             chunk.sections(),
