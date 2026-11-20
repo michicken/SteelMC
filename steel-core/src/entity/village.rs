@@ -4,13 +4,21 @@
 //! blocks around a village centre, counts valid POIs, and spawns an iron golem when the
 //! vanilla population/bed/workstation thresholds are met.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use glam::DVec3;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
-use steel_registry::blocks::properties::BlockStateProperties;
+use steel_registry::blocks::properties::{BlockStateProperties, IntProperty};
+use steel_registry::blocks::{Block, BlockRef};
+use steel_registry::fluid::FluidStateExt as _;
 use steel_registry::item_stack::ItemStack;
+use steel_registry::items::{Item, ItemRef};
 use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
+use steel_utils::locks::SyncMutex;
+use steel_utils::random::Random as _;
 use steel_utils::{BlockPos, Downcast as _, WorldAabb};
 
 use crate::entity::entities::IronGolemEntity;
@@ -104,9 +112,51 @@ pub fn nearby_villagers(world: &World, center: BlockPos, radius: f64) -> Vec<Sha
     })
 }
 
+/// Checks whether an iron golem could stand at `feet`: a solid block below,
+/// two free body blocks, and no lava or water at the feet.
+#[must_use]
+fn golem_spawn_position_valid(world: &World, feet: BlockPos) -> bool {
+    if !world.is_in_valid_bounds(feet) {
+        return false;
+    }
+    let below = world.get_block_state(feet.below());
+    if !below.is_solid() {
+        return false;
+    }
+    let feet_state = world.get_block_state(feet);
+    let head_state = world.get_block_state(feet.above());
+    if !feet_state.is_air() || !head_state.is_air() {
+        return false;
+    }
+    let feet_fluid = feet_state.get_fluid_state();
+    if feet_fluid.is_lava() || feet_fluid.is_water() {
+        return false;
+    }
+    true
+}
+
+/// Searches the blocks immediately around `center` for a valid golem spawn
+/// position, preferring the centre itself and its nearest neighbours.
+#[must_use]
+fn find_golem_spawn(world: &World, center: BlockPos) -> Option<BlockPos> {
+    let horizontal = [0, -1, 1, -2, 2];
+    for dx in horizontal {
+        for dz in horizontal {
+            for dy in [-1, 0, 1] {
+                let feet = center.offset(dx, dy, dz);
+                if golem_spawn_position_valid(world, feet) {
+                    return Some(feet);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Tries to spawn an iron golem for a village at `center`.
 ///
-/// Returns the spawned golem when the population/bed/workstation thresholds pass.
+/// Returns the spawned golem when the population/bed/workstation thresholds
+/// pass and a valid standing position could be found.
 pub fn try_spawn_iron_golem(world: &Arc<World>, center: BlockPos) -> Option<SharedEntity> {
     let golems = world.get_entities_in_aabb_matching(
         &WorldAabb::new(
@@ -128,10 +178,14 @@ pub fn try_spawn_iron_golem(world: &Arc<World>, center: BlockPos) -> Option<Shar
         return None;
     }
 
+    let Some(feet) = find_golem_spawn(world, center) else {
+        log::debug!("iron golem: no valid standing position near {center:?}");
+        return None;
+    };
     let spawn = DVec3::new(
-        f64::from(center.x()) + 0.5,
-        f64::from(center.y()) + 1.0,
-        f64::from(center.z()) + 0.5,
+        f64::from(feet.x()) + 0.5,
+        f64::from(feet.y()),
+        f64::from(feet.z()) + 0.5,
     );
     let golem: SharedEntity = Arc::new(IronGolemEntity::new(
         &vanilla_entities::IRON_GOLEM,
@@ -139,15 +193,66 @@ pub fn try_spawn_iron_golem(world: &Arc<World>, center: BlockPos) -> Option<Shar
         spawn,
         Arc::downgrade(world),
     ));
-    world.try_add_entity(Arc::clone(&golem)).ok()?;
+    if let Err(error) = world.try_add_entity(Arc::clone(&golem)) {
+        log::debug!("failed to add iron golem at {feet:?}: {error}");
+        return None;
+    }
     Some(golem)
 }
 
-/// Harvests mature wheat within `radius` of `center` and replants it.
+/// Describes one mature crop the villagers can harvest and replant.
+struct CropDefinition {
+    crop_block: BlockRef,
+    age_property: &'static IntProperty,
+    mature_age: u8,
+    product: ItemRef,
+    seed: Option<ItemRef>,
+}
+
+/// Harvestable village crops: wheat, carrots, potatoes and beetroots.
+static CROP_DEFINITIONS: LazyLock<Vec<CropDefinition>> = LazyLock::new(|| {
+    vec![
+        CropDefinition {
+            crop_block: &vanilla_blocks::WHEAT,
+            age_property: &BlockStateProperties::AGE_7,
+            mature_age: 7,
+            product: &vanilla_items::WHEAT,
+            seed: Some(&vanilla_items::WHEAT_SEEDS),
+        },
+        CropDefinition {
+            crop_block: &vanilla_blocks::CARROTS,
+            age_property: &BlockStateProperties::AGE_7,
+            mature_age: 7,
+            product: &vanilla_items::CARROT,
+            seed: None,
+        },
+        CropDefinition {
+            crop_block: &vanilla_blocks::POTATOES,
+            age_property: &BlockStateProperties::AGE_7,
+            mature_age: 7,
+            product: &vanilla_items::POTATO,
+            seed: None,
+        },
+        CropDefinition {
+            crop_block: &vanilla_blocks::BEETROOTS,
+            age_property: &BlockStateProperties::AGE_3,
+            mature_age: 3,
+            product: &vanilla_items::BEETROOT,
+            seed: Some(&vanilla_items::BEETROOT_SEEDS),
+        },
+    ]
+});
+
+fn crop_definition(block: &Block) -> Option<&'static CropDefinition> {
+    CROP_DEFINITIONS.iter().find(|crop| crop.crop_block == block)
+}
+
+/// Harvests mature crops within `radius` of `center` and replants them.
 ///
 /// Returns `(harvested, replanted)` counts. Drops are real item entities so
-/// hoppers can collect them.
-pub fn harvest_mature_wheat_near(
+/// hoppers can collect them; seed drops use the world's seeded random source
+/// and roll 0..=2.
+pub fn harvest_mature_crops_near(
     world: &Arc<World>,
     center: BlockPos,
     radius: i32,
@@ -159,10 +264,10 @@ pub fn harvest_mature_wheat_near(
             for dy in -1..=1 {
                 let pos = center.offset(dx, dy, dz);
                 let state = world.get_block_state(pos);
-                if state.get_block() != &vanilla_blocks::WHEAT {
+                let Some(crop) = crop_definition(state.get_block()) else {
                     continue;
-                }
-                if state.get_value(&BlockStateProperties::AGE_7) < 7 {
+                };
+                if state.get_value(crop.age_property) < crop.mature_age {
                     continue;
                 }
                 world.set_block(
@@ -170,25 +275,24 @@ pub fn harvest_mature_wheat_near(
                     vanilla_blocks::AIR.default_state(),
                     steel_utils::types::UpdateFlags::UPDATE_ALL,
                 );
-                world.spawn_item(
-                    glam::DVec3::new(
-                        f64::from(pos.x()) + 0.5,
-                        f64::from(pos.y()) + 0.5,
-                        f64::from(pos.z()) + 0.5,
-                    ),
-                    ItemStack::new(&vanilla_items::WHEAT),
+                let drop_pos = glam::DVec3::new(
+                    f64::from(pos.x()) + 0.5,
+                    f64::from(pos.y()) + 0.5,
+                    f64::from(pos.z()) + 0.5,
                 );
-                world.spawn_item(
-                    glam::DVec3::new(
-                        f64::from(pos.x()) + 0.5,
-                        f64::from(pos.y()) + 0.5,
-                        f64::from(pos.z()) + 0.5,
-                    ),
-                    ItemStack::new(&vanilla_items::WHEAT_SEEDS),
-                );
+                world.spawn_item(drop_pos, ItemStack::new(crop.product));
+                if let Some(seed) = crop.seed {
+                    let seed_count = world
+                        .loot_random
+                        .lock()
+                        .next_i32_between(0, 2);
+                    if seed_count > 0 {
+                        world.spawn_item(drop_pos, ItemStack::with_count(seed, seed_count));
+                    }
+                }
                 world.set_block(
                     pos,
-                    vanilla_blocks::WHEAT.default_state(),
+                    crop.crop_block.default_state(),
                     steel_utils::types::UpdateFlags::UPDATE_ALL,
                 );
                 harvested += 1;
@@ -199,21 +303,64 @@ pub fn harvest_mature_wheat_near(
     (harvested, replanted)
 }
 
-/// Harvests mature wheat within four blocks of each village and replants it.
+/// Harvests mature crops within four blocks of each village and replants it.
 ///
 /// Returns `(harvested, replanted)` counts. This is the village crop-farm loop:
-/// villagers are the workforce, farmland/wheat are the POIs, and drops are real
+/// villagers are the workforce, farmland/crops are the POIs, and drops are real
 /// item entities so hoppers can collect them.
 pub fn tick_village_crop_farm(world: &Arc<World>, center: BlockPos) -> (usize, usize) {
     let villagers = nearby_villagers(world, center, f64::from(VILLAGE_POI_RADIUS));
     let mut harvested = 0;
     let mut replanted = 0;
     for villager in villagers {
-        let (h, r) = harvest_mature_wheat_near(world, villager.block_position(), 4);
+        let (h, r) = harvest_mature_crops_near(world, villager.block_position(), 4);
         harvested += h;
         replanted += r;
     }
     (harvested, replanted)
+}
+
+/// Village-level aggregation window: the crop-farm scan and iron-golem attempt
+/// run at most once per village chunk per this many game ticks, instead of once
+/// per villager. Thresholds themselves are unchanged.
+const VILLAGE_AGGREGATION_INTERVAL: i64 = 200;
+
+static LAST_VILLAGE_AGGREGATION: LazyLock<SyncMutex<HashMap<(usize, i32, i32), i64>>> =
+    LazyLock::new(|| SyncMutex::new(HashMap::new()));
+static VILLAGE_ATTEMPT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of aggregated village attempts executed since process start.
+/// Exposed for tests to assert multi-villager dedup.
+#[must_use]
+pub fn village_attempt_count() -> usize {
+    VILLAGE_ATTEMPT_COUNT.load(Ordering::Relaxed)
+}
+
+/// Runs the village crop-farm scan and iron-golem attempt for the chunk owning
+/// `center`, unless the aggregated run already happened within the interval.
+///
+/// Returns `(harvested, replanted, golem_attempted)`.
+pub fn tick_village_if_due(world: &Arc<World>, center: BlockPos) -> (usize, usize, bool) {
+    // The owning world is part of the key: aggregation state must not leak
+    // across worlds (or across test worlds sharing chunk coordinates).
+    let world_key = Arc::as_ptr(&world.game_time) as usize;
+    let key = (world_key, center.x() >> 4, center.z() >> 4);
+    let now = world.game_time();
+    {
+        let mut last = LAST_VILLAGE_AGGREGATION.lock();
+        let due = last
+            .get(&key)
+            .map_or(true, |&tick| now - tick >= VILLAGE_AGGREGATION_INTERVAL);
+        if !due {
+            return (0, 0, false);
+        }
+        last.insert(key, now);
+    }
+    VILLAGE_ATTEMPT_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    let (harvested, replanted) = tick_village_crop_farm(world, center);
+    let golem = try_spawn_iron_golem(world, center);
+    (harvested, replanted, golem.is_some())
 }
 
 #[cfg(test)]
@@ -244,6 +391,25 @@ mod tests {
         ))
     }
 
+    fn place_stone_floor(
+        world: &Arc<crate::world::World>,
+        y: i32,
+        x0: i32,
+        x1: i32,
+        z0: i32,
+        z1: i32,
+    ) {
+        for x in x0..=x1 {
+            for z in z0..=z1 {
+                world.set_block(
+                    steel_utils::BlockPos::new(x, y, z),
+                    vanilla_blocks::STONE.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+            }
+        }
+    }
+
     #[test]
     fn village_with_three_villagers_beds_and_composters_spawns_iron_golem() {
         init_vanilla_registry();
@@ -251,6 +417,7 @@ mod tests {
         let fixture = fresh_test_world("village_iron_golem");
         let world = &fixture.world;
         insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        place_stone_floor(world, 63, 8, 12, 6, 10);
         for x in [8.0, 10.0, 12.0] {
             world
                 .try_add_entity(villager(world, x))
@@ -290,6 +457,7 @@ mod tests {
         let fixture = fresh_test_world("village_crop_auto");
         let world = &fixture.world;
         insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        place_stone_floor(world, 63, 7, 10, 7, 9);
 
         let villager = villager(world, 8.0);
         world
@@ -362,6 +530,7 @@ mod tests {
         let fixture = fresh_test_world("village_iron_farm");
         let world = &fixture.world;
         insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        place_stone_floor(world, 63, 8, 12, 6, 10);
         for x in [8.0, 10.0, 12.0] {
             world
                 .try_add_entity(villager(world, x))
@@ -500,5 +669,87 @@ mod tests {
             |entity| entity.entity_type() == &vanilla_entities::ITEM,
         );
         assert!(!drops.is_empty(), "wheat harvest must spawn item entities");
+    }
+
+    #[test]
+    fn golem_spawn_position_valid_accepts_clear_standable_position() {
+        init_vanilla_registry();
+        let fixture = fresh_test_world("golem_spawn_valid");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let below = steel_utils::BlockPos::new(10, 63, 8);
+        let feet = steel_utils::BlockPos::new(10, 64, 8);
+        world.set_block(below, vanilla_blocks::STONE.default_state(), UpdateFlags::UPDATE_ALL);
+
+        assert!(super::golem_spawn_position_valid(world, feet));
+    }
+
+    #[test]
+    fn golem_spawn_position_valid_rejects_blocked_body_or_missing_floor() {
+        init_vanilla_registry();
+        let fixture = fresh_test_world("golem_spawn_invalid_body");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let feet = steel_utils::BlockPos::new(10, 64, 8);
+        // No solid floor below.
+        assert!(!super::golem_spawn_position_valid(world, feet));
+
+        world.set_block(
+            feet,
+            vanilla_blocks::STONE.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+        // Block occupying the feet position.
+        assert!(!super::golem_spawn_position_valid(world, feet));
+
+        let head = steel_utils::BlockPos::new(10, 65, 8);
+        world.set_block(
+            head,
+            vanilla_blocks::STONE.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        );
+        // Block occupying the head position.
+        assert!(!super::golem_spawn_position_valid(world, feet));
+    }
+
+    #[test]
+    fn golem_spawn_position_valid_rejects_water_and_lava_feet() {
+        init_vanilla_registry();
+        let fixture = fresh_test_world("golem_spawn_fluid");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let below = steel_utils::BlockPos::new(10, 63, 8);
+        let feet = steel_utils::BlockPos::new(10, 64, 8);
+        world.set_block(below, vanilla_blocks::STONE.default_state(), UpdateFlags::UPDATE_ALL);
+
+        world.set_block(feet, vanilla_blocks::WATER.default_state(), UpdateFlags::UPDATE_ALL);
+        assert!(!super::golem_spawn_position_valid(world, feet));
+
+        world.set_block(feet, vanilla_blocks::LAVA.default_state(), UpdateFlags::UPDATE_ALL);
+        assert!(!super::golem_spawn_position_valid(world, feet));
+    }
+
+    #[test]
+    fn village_aggregation_runs_once_per_chunk_despite_many_villagers() {
+        init_vanilla_registry();
+        crate::behavior::init_behaviors();
+        let fixture = fresh_test_world("village_dedup");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        let before = super::village_attempt_count();
+        // Six villagers would each trigger a village scan before aggregation;
+        // the chunk-level gate must collapse them into a single attempt.
+        for _ in 0..6 {
+            super::tick_village_if_due(world, steel_utils::BlockPos::new(10, 64, 8));
+        }
+        assert_eq!(
+            super::village_attempt_count() - before,
+            1,
+            "village-level aggregation must run at most once per chunk window"
+        );
     }
 }

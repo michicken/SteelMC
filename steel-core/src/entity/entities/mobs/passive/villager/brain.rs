@@ -23,7 +23,7 @@ use crate::entity::ai::brain::memory::{
     MemoryModuleType, MemoryModuleTypeRef, MemoryStatus, MemoryValue,
 };
 use crate::entity::ai::brain::sensor::Sensor;
-use crate::entity::village::harvest_mature_wheat_near;
+use crate::entity::village::harvest_mature_crops_near;
 use crate::poi::OccupationStatus;
 
 /// A villager's claimed workstation position.
@@ -200,7 +200,7 @@ impl Behavior for WorkAtJobSite {
             return;
         }
 
-        let (harvested, replanted) = harvest_mature_wheat_near(&world, site.0, 3);
+        let (harvested, replanted) = harvest_mature_crops_near(&world, site.0, 3);
         if harvested > 0 && replanted > 0 {
             log::debug!(
                 "villager harvested {harvested} wheat and replanted {replanted} at {:?}",
