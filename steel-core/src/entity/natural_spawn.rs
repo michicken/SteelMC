@@ -12,11 +12,12 @@ use steel_registry::{vanilla_blocks, vanilla_entities};
 use steel_utils::BlockPos;
 
 use steel_registry::vanilla_dimension_types;
+use steel_utils::random::{Random as _, RandomSource, legacy_random::LegacyRandom};
 
 use crate::chunk::light::LightLayer;
 use crate::entity::entities::{
-    BlazeEntity, ChickenEntity, CowEntity, EndermanEntity, GhastEntity, PigEntity, SheepEntity,
-    SkeletonEntity, SpiderEntity, WitherSkeletonEntity, ZombieEntity,
+    BlazeEntity, EndermanEntity, GhastEntity, SkeletonEntity, SpiderEntity,
+    WitherSkeletonEntity, ZombieEntity,
 };
 use crate::entity::{Entity, SharedEntity, next_entity_id};
 use crate::world::World;
@@ -29,6 +30,10 @@ const HOSTILE_CAP: usize = 24;
 const PASSIVE_CAP: usize = 10;
 /// Nether brick search radius for fortress-only spawns.
 const FORTRESS_SEARCH_RADIUS: i32 = 16;
+/// Minimum horizontal distance from a player; the vanilla ring is wider (24–44),
+/// but the current candidate box is only ±16 around the player, so this lower
+/// bound keeps mobs off the player's same block and face-to-face position.
+const MIN_SPAWN_DISTANCE_SQR: f64 = 5.0 * 5.0;
 
 /// Tries to spawn naturally near every player. Returns the number spawned.
 pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> usize {
@@ -38,6 +43,9 @@ pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> us
         false
     });
     let mut spawned = 0;
+    // Seed the spawn rolls from the world seed so the same world reproduces the
+    // same spawn sequence instead of relying on the process-wide `rand` pool.
+    let mut random = RandomSource::Legacy(LegacyRandom::from_seed(world.seed() as u64));
     for (player_pos, _) in players {
         let hostiles = world
             .get_entities_in_aabb_matching(
@@ -57,15 +65,20 @@ pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> us
         }
 
         for _ in 0..attempts_per_player {
-            let x = player_pos.x + (rand::random::<f64>() - 0.5) * 32.0;
-            let z = player_pos.z + (rand::random::<f64>() - 0.5) * 32.0;
-            let y = player_pos.y + (rand::random::<f64>() - 0.5) * 16.0;
+            let x = player_pos.x + (random.next_f64() - 0.5) * 32.0;
+            let z = player_pos.z + (random.next_f64() - 0.5) * 32.0;
+            let y = player_pos.y + (random.next_f64() - 0.5) * 16.0;
+            let dx = x - player_pos.x;
+            let dz = z - player_pos.z;
+            if dx * dx + dz * dz < MIN_SPAWN_DISTANCE_SQR {
+                continue;
+            }
             let pos = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
             if !is_dark_spawnable(world, pos) {
                 continue;
             }
 
-            let entity: SharedEntity = spawn_hostile_for_dimension(world, pos);
+            let entity: SharedEntity = spawn_hostile_for_dimension(world, pos, &mut random);
             if world.try_add_entity(entity).is_ok() {
                 spawned += 1;
             }
@@ -80,10 +93,15 @@ fn is_hostile(entity_type: steel_registry::entity_type::EntityTypeRef) -> bool {
         || entity_type == &vanilla_entities::SPIDER
         || entity_type == &vanilla_entities::ENDERMAN
         || entity_type == &vanilla_entities::BLAZE
+        || entity_type == &vanilla_entities::GHAST
         || entity_type == &vanilla_entities::WITHER_SKELETON
 }
 
-fn spawn_hostile_for_dimension(world: &Arc<World>, pos: BlockPos) -> SharedEntity {
+fn spawn_hostile_for_dimension(
+    world: &Arc<World>,
+    pos: BlockPos,
+    random: &mut RandomSource,
+) -> SharedEntity {
     if world.dimension_type == &vanilla_dimension_types::THE_END {
         return Arc::new(EndermanEntity::new(
             &vanilla_entities::ENDERMAN,
@@ -94,7 +112,7 @@ fn spawn_hostile_for_dimension(world: &Arc<World>, pos: BlockPos) -> SharedEntit
     }
     if world.dimension_type == &vanilla_dimension_types::THE_NETHER {
         if near_nether_bricks(world, pos) {
-            return if rand::random::<bool>() {
+            return if random.next_bool() {
                 Arc::new(BlazeEntity::new(
                     &vanilla_entities::BLAZE,
                     next_entity_id(),
@@ -110,14 +128,10 @@ fn spawn_hostile_for_dimension(world: &Arc<World>, pos: BlockPos) -> SharedEntit
                 ))
             };
         }
-        return match rand::random::<u8>() % 5 {
-            0 | 1 => Arc::new(ZombieEntity::new(
-                &vanilla_entities::ZOMBIE,
-                next_entity_id(),
-                pos.get_center(),
-                Arc::downgrade(world),
-            )),
-            2 => Arc::new(GhastEntity::new(
+        // Non-fortress Nether: ghasts and wither skeletons only. Zombies are an
+        // Overworld mob and must not spawn on Nether surface.
+        return match random.next_i32_bounded(3) {
+            0 => Arc::new(GhastEntity::new(
                 &vanilla_entities::GHAST,
                 next_entity_id(),
                 pos.get_center(),
@@ -132,7 +146,7 @@ fn spawn_hostile_for_dimension(world: &Arc<World>, pos: BlockPos) -> SharedEntit
         };
     }
 
-    match rand::random::<u8>() % 10 {
+    match random.next_i32_bounded(10) {
         0 => Arc::new(EndermanEntity::new(
             &vanilla_entities::ENDERMAN,
             next_entity_id(),
@@ -182,6 +196,11 @@ fn is_dark_spawnable(world: &Arc<World>, pos: BlockPos) -> bool {
         return false;
     }
     if world.get_block_state(pos).get_block() != &vanilla_blocks::AIR {
+        return false;
+    }
+    // Hostiles are two blocks tall; the block above the spawn position has to be
+    // free as well, otherwise the mob suffocates in a one-block-high gap.
+    if !world.get_block_state(pos.above()).is_air() {
         return false;
     }
     let below = world.get_block_state(pos.below());
@@ -376,6 +395,157 @@ mod tests {
             )
             .len();
         assert!(fortress_mobs > 0, "fortress bricks must spawn blaze/wither skeletons");
+    }
+
+    #[test]
+    fn spawned_hostiles_keep_the_minimum_player_distance() {
+        init_vanilla_registry();
+        init_behaviors();
+        init_block_entities();
+        let fixture = fresh_test_world("natural_spawn_distance");
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+
+        for x in 1..15 {
+            for z in 1..15 {
+                world.set_block(
+                    BlockPos::new(x, 64, z),
+                    vanilla_blocks::STONE.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+                world.set_block(
+                    BlockPos::new(x, 70, z),
+                    vanilla_blocks::STONE.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+            }
+        }
+
+        let player = TestPlayerBuilder::new(Arc::clone(world), "DistanceAfk", 95).build();
+        let player_pos = glam::DVec3::new(8.5, 65.0, 8.5);
+        player.teleport_to(player_pos).expect("player floor");
+        assert!(world.add_player(player, ResetReason::InitialJoin));
+
+        assert!(tick_natural_spawns(world, 800) > 0, "tower must spawn hostiles");
+        let hostiles = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 72.0, 16.0),
+            |entity| super::is_hostile(entity.entity_type()),
+        );
+        for hostile in hostiles {
+            let pos = hostile.position();
+            let dx = pos.x - player_pos.x;
+            let dz = pos.z - player_pos.z;
+            assert!(
+                dx * dx + dz * dz >= 5.0 * 5.0,
+                "hostile at {pos:?} spawned too close to the player"
+            );
+        }
+    }
+
+    #[test]
+    fn non_fortress_nether_does_not_spawn_zombies() {
+        init_vanilla_registry();
+        init_behaviors();
+        init_block_entities();
+        let fixture = crate::test_support::fresh_test_world_with_dimension_type(
+            "natural_spawn_nether_no_zombie",
+            "natural_spawn_nether_no_zombie",
+            &steel_registry::vanilla_dimension_types::THE_NETHER,
+        );
+        let world = &fixture.world;
+        insert_ready_full_chunk(world, ChunkPos::new(0, 0));
+        for x in 1..15 {
+            for z in 1..15 {
+                world.set_block(
+                    BlockPos::new(x, 64, z),
+                    vanilla_blocks::NETHERRACK.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+                world.set_block(
+                    BlockPos::new(x, 70, z),
+                    vanilla_blocks::NETHERRACK.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+            }
+        }
+        let player = TestPlayerBuilder::new(Arc::clone(world), "NetherAfk2", 94).build();
+        player.teleport_to(glam::DVec3::new(8.5, 65.0, 8.5)).expect("nether floor");
+        assert!(world.add_player(player, ResetReason::InitialJoin));
+
+        assert!(tick_natural_spawns(world, 800) > 0, "nether must spawn hostiles");
+        let zombies = world.get_entities_in_aabb_matching(
+            &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 72.0, 16.0),
+            |entity| entity.entity_type() == &vanilla_entities::ZOMBIE,
+        );
+        assert!(
+            zombies.is_empty(),
+            "zombies must not spawn outside Nether fortresses"
+        );
+    }
+
+    #[test]
+    fn the_same_world_seed_reproduces_the_spawn_sequence() {
+        init_vanilla_registry();
+        init_behaviors();
+        init_block_entities();
+
+        let build_world = |key: &'static str| {
+            let fixture = fresh_test_world(key);
+            let world = fixture.world;
+            insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+            for x in 1..15 {
+                for z in 1..15 {
+                    world.set_block(
+                        BlockPos::new(x, 64, z),
+                        vanilla_blocks::STONE.default_state(),
+                        UpdateFlags::UPDATE_ALL,
+                    );
+                    world.set_block(
+                        BlockPos::new(x, 70, z),
+                        vanilla_blocks::STONE.default_state(),
+                        UpdateFlags::UPDATE_ALL,
+                    );
+                }
+            }
+            let player = TestPlayerBuilder::new(Arc::clone(&world), "DeterminismAfk", 93).build();
+            player
+                .teleport_to(glam::DVec3::new(8.5, 65.0, 8.5))
+                .expect("player floor");
+            assert!(world.add_player(player, ResetReason::InitialJoin));
+            world
+        };
+
+        let first = build_world("natural_spawn_determinism_a");
+        let second = build_world("natural_spawn_determinism_b");
+        tick_natural_spawns(&first, 400);
+        tick_natural_spawns(&second, 400);
+
+        let snapshot = |world: &Arc<crate::world::World>| {
+            let mut entries: Vec<(String, i32, i32, i32)> = world
+                .get_entities_in_aabb_matching(
+                    &steel_utils::WorldAabb::new(0.0, 63.0, 0.0, 16.0, 72.0, 16.0),
+                    |entity| super::is_hostile(entity.entity_type()),
+                )
+                .iter()
+                .map(|entity| {
+                    let pos = entity.position();
+                    (
+                        entity.entity_type().key.to_string(),
+                        pos.x.floor() as i32,
+                        pos.y.floor() as i32,
+                        pos.z.floor() as i32,
+                    )
+                })
+                .collect();
+            entries.sort();
+            entries
+        };
+
+        assert_eq!(
+            snapshot(&first),
+            snapshot(&second),
+            "identical seeds and rooms must produce the same spawn layout"
+        );
     }
 
     #[test]
