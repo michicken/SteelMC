@@ -1,9 +1,7 @@
 //! Vanilla `/effect` command support.
 
-use std::str::FromStr;
-
 use steel_registry::{REGISTRY, RegistryExt as _, mob_effect::MobEffectRef};
-use steel_utils::Identifier;
+use steel_utils::{Identifier, translations};
 use text_components::TextComponent;
 
 use super::super::{
@@ -14,7 +12,10 @@ use super::super::{
     },
     registration::CommandRegistration,
 };
-use crate::{behavior::MOB_EFFECT_BEHAVIORS, entity::MobEffectInstance};
+use crate::{
+    behavior::MOB_EFFECT_BEHAVIORS,
+    entity::{MobEffectInstance, SharedEntity},
+};
 
 pub(super) fn registration() -> CommandRegistration<CommandSource> {
     CommandRegistration::new(Identifier::vanilla_static("effect"), |_| command())
@@ -24,8 +25,8 @@ fn command() -> CommandNodeBuilder<CommandSource, SteelCommandRuntime> {
     literal("effect")
         .then(
             literal("give").then(
-                argument("targets", SteelArgumentType::entity()).then(
-                    argument("effect", ArgumentType::string())
+                argument("targets", SteelArgumentType::entities()).then(
+                    argument("effect", SteelArgumentType::mob_effect())
                         .executes(give)
                         .then(
                             argument("seconds", ArgumentType::integer(1, 1_000_000))
@@ -53,10 +54,10 @@ fn command() -> CommandNodeBuilder<CommandSource, SteelCommandRuntime> {
             ),
         )
         .then(
-            literal("clear").then(
-                argument("targets", SteelArgumentType::entity())
+            literal("clear").executes(clear_self).then(
+                argument("targets", SteelArgumentType::entities())
                     .executes(clear)
-                    .then(argument("effect", ArgumentType::string()).executes(clear)),
+                    .then(argument("effect", SteelArgumentType::mob_effect()).executes(clear)),
             ),
         )
 }
@@ -64,12 +65,9 @@ fn command() -> CommandNodeBuilder<CommandSource, SteelCommandRuntime> {
 fn parse_effect(
     context: &SteelCommandContext<CommandSource>,
 ) -> Result<MobEffectRef, CommandSyntaxError> {
-    let raw = context.string("effect")?;
-    let key = Identifier::from_str(raw).map_err(|_| {
-        CommandSyntaxError::dynamic(TextComponent::from(format!("Unknown effect: {raw}")))
-    })?;
-    REGISTRY.mob_effects.by_key(&key).ok_or_else(|| {
-        CommandSyntaxError::dynamic(TextComponent::from(format!("Unknown effect: {raw}")))
+    let key = context.identifier("effect")?;
+    REGISTRY.mob_effects.by_key(key).ok_or_else(|| {
+        CommandSyntaxError::dynamic(TextComponent::from(format!("Unknown effect: {key}")))
     })
 }
 
@@ -117,6 +115,11 @@ fn give_with_duration(
             applied += 1;
         }
     }
+    if applied == 0 {
+        return Err(CommandSyntaxError::dynamic(TextComponent::from(
+            &translations::COMMANDS_EFFECT_GIVE_FAILED,
+        )));
+    }
     context.source().send_success(
         &TextComponent::from(format!("Applied {effect:?} to {applied} entit(y/ies)")),
         false,
@@ -124,14 +127,30 @@ fn give_with_duration(
     Ok(applied)
 }
 
+fn clear_self(context: &SteelCommandContext<CommandSource>) -> Result<i32, CommandSyntaxError> {
+    let entity = context.source().entity().ok_or_else(|| {
+        CommandSyntaxError::dynamic(TextComponent::from(
+            &translations::PERMISSIONS_REQUIRES_ENTITY,
+        ))
+    })?;
+    clear_targets(context, std::slice::from_ref(entity), None)
+}
+
 fn clear(context: &SteelCommandContext<CommandSource>) -> Result<i32, CommandSyntaxError> {
     let targets = context.entities("targets")?;
-    let only_effect = if context.string("effect").is_ok() {
+    let only_effect = if context.identifier("effect").is_ok() {
         Some(parse_effect(context)?)
     } else {
         None
     };
+    clear_targets(context, &targets, only_effect)
+}
 
+fn clear_targets(
+    context: &SteelCommandContext<CommandSource>,
+    targets: &[SharedEntity],
+    only_effect: Option<MobEffectRef>,
+) -> Result<i32, CommandSyntaxError> {
     let mut cleared = 0;
     for target in targets {
         let Some(living) = target.as_living_entity() else {
@@ -143,11 +162,21 @@ fn clear(context: &SteelCommandContext<CommandSource>) -> Result<i32, CommandSyn
             }
         } else {
             let effects = living.active_mob_effects();
-            for effect in effects {
-                living.remove_mob_effect(effect.effect());
+            if !effects.is_empty() {
+                for effect in effects {
+                    living.remove_mob_effect(effect.effect());
+                }
+                cleared += 1;
             }
-            cleared += 1;
         }
+    }
+    if cleared == 0 {
+        let message = if only_effect.is_some() {
+            &translations::COMMANDS_EFFECT_CLEAR_SPECIFIC_FAILED
+        } else {
+            &translations::COMMANDS_EFFECT_CLEAR_EVERYTHING_FAILED
+        };
+        return Err(CommandSyntaxError::dynamic(TextComponent::from(message)));
     }
     context.source().send_success(
         &TextComponent::from(format!("Cleared effects from {cleared} entit(y/ies)")),

@@ -368,6 +368,10 @@ impl SteelArgumentType {
         Self::new(StorageKeyParser)
     }
 
+    pub(crate) fn mob_effect() -> Self {
+        Self::new(MobEffectParser)
+    }
+
     pub(crate) fn sound() -> Self {
         Self::new(SoundParser)
     }
@@ -1256,6 +1260,26 @@ unit_argument_parser!(
     },
     protocol(
         ProtocolArgumentType::ResourceLocation,
+        Some(ProtocolSuggestionType::AskServer),
+    )
+);
+unit_argument_parser!(
+    MobEffectParser,
+    "steel:command/parser/mob_effect",
+    IdentifierValue,
+    parse | reader,
+    _source | { parse_identifier(reader).map(IdentifierValue) },
+    suggest | _context,
+    builder | {
+        suggest_resources(
+            REGISTRY.mob_effects.iter().map(|(_, effect)| &effect.key),
+            builder,
+        );
+    },
+    protocol(
+        ProtocolArgumentType::Resource {
+            identifier: "minecraft:mob_effect"
+        },
         Some(ProtocolSuggestionType::AskServer),
     )
 );
