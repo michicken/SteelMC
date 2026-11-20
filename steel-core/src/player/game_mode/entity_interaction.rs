@@ -373,11 +373,7 @@ impl Player {
     /// Performs a spear jab along the view ray. Unlike the held charge this
     /// ignores closing-speed gates: a stab at normal reach always deals the
     /// player's attack damage, with knockback/dismount gated by current speed.
-    pub(super) fn kinetic_attack(
-        self: &Arc<Self>,
-        item_stack: &ItemStack,
-        weapon: &KineticWeapon,
-    ) {
+    pub(super) fn kinetic_attack(self: &Arc<Self>, item_stack: &ItemStack, weapon: &KineticWeapon) {
         let world = self.get_world();
         let look = self.look_angle();
         let speed = if look.length_squared() <= f64::EPSILON {
@@ -397,13 +393,8 @@ impl Player {
             .required_value(vanilla_attributes::ATTACK_DAMAGE) as f32;
         let mut hit_something = false;
         for target in self.piercing_hit_entities(item_stack, &world) {
-            hit_something |= self.stab_attack(
-                &target,
-                base_damage,
-                true,
-                deals_knockback,
-                dismounts,
-            );
+            hit_something |=
+                self.stab_attack(&target, base_damage, true, deals_knockback, dismounts);
         }
 
         self.reset_attack_strength_ticker();
@@ -416,6 +407,18 @@ impl Player {
             self.attack_animation(InteractionHand::MainHand),
             false,
         );
+    }
+
+    /// Projects movement in blocks per second, as required by kinetic weapon conditions.
+    fn kinetic_motion(entity: &dyn Entity) -> DVec3 {
+        const TICKS_PER_SECOND: f64 = 20.0;
+
+        if entity.as_player().is_none()
+            && let Some(vehicle) = entity.root_vehicle()
+        {
+            return vehicle.known_speed() * TICKS_PER_SECOND;
+        }
+        entity.known_speed() * TICKS_PER_SECOND
     }
 
     /// Ticks a held spear-style charge. Vanilla recomputes this every tick while
@@ -456,7 +459,7 @@ impl Player {
             .lock()
             .required_value(vanilla_attributes::ATTACK_DAMAGE) as f32;
         // Velocities are blocks/tick; the component's speed gates are blocks/second.
-        let user_speed = player.velocity().dot(look) * 20.0;
+        let user_speed = Self::kinetic_motion(player).dot(look);
         let damage_type = item_stack
             .get_damage_type()
             .unwrap_or(&vanilla_damage_types::SPEAR);
@@ -464,7 +467,8 @@ impl Player {
         let mut hit_any = false;
 
         for target in player.piercing_hit_entities(item_stack, &world) {
-            let closing_speed = user_speed - target.velocity().dot(look) * 20.0;
+            let closing_speed =
+                (user_speed - Self::kinetic_motion(target.as_ref()).dot(look)).max(0.0);
             if closing_speed < f64::from(damage_condition.min_relative_speed())
                 || user_speed < f64::from(damage_condition.min_speed())
             {
@@ -508,7 +512,8 @@ impl Player {
         deals_damage: bool,
         deals_knockback: bool,
         dismounts: bool,
-    ) -> bool {        let entity = target.as_ref();
+    ) -> bool {
+        let entity = target.as_ref();
         if self.cannot_attack(entity) {
             return false;
         }

@@ -2227,7 +2227,9 @@ fn spear_charge_damages_a_target_when_closing_fast_enough() {
     for _ in 0..20 {
         fixture
             .attacker
-            .set_velocity(DVec3::new(0.0, 0.0, 0.4));
+            .movement
+            .lock()
+            .set_last_known_client_movement(DVec3::new(0.0, 0.0, 0.4));
         fixture.attacker.tick_active_item_use(&entity);
     }
 
@@ -2235,4 +2237,40 @@ fn spear_charge_damages_a_target_when_closing_fast_enough() {
         pig.invulnerable_time() > 0,
         "a held spear charge must damage a target it closes on"
     );
+}
+
+#[test]
+fn spear_charge_damages_a_player_using_reported_relative_motion() {
+    let fixture = MeleeFixture::new("player_spear_pvp_charge");
+    let attacker = &fixture.attacker;
+    attacker
+        .inventory
+        .lock()
+        .set_selected_item(ItemStack::new(&vanilla_items::WOODEN_SPEAR));
+    attacker.set_rotation((0.0, 0.0));
+
+    let target = TestPlayerBuilder::new(Arc::clone(&fixture.world), "Target", next_entity_id())
+        .build();
+    target.set_client_loaded(true);
+    target.base().set_position_local(attacker.position() + DVec3::new(0.0, 0.0, 3.0));
+    assert!(fixture.world.add_player(Arc::clone(&target), ResetReason::InitialJoin));
+
+    let initial_health = target.get_health();
+    let attacker_entity: SharedEntity = Arc::<Player>::clone(attacker);
+    let forward = DVec3::new(0.0, 0.0, 0.4);
+    attacker.movement.lock().set_last_known_client_movement(forward);
+    target.movement.lock().set_last_known_client_movement(forward);
+    attacker.start_using_item(InteractionHand::MainHand);
+    for _ in 0..20 {
+        attacker.tick_active_item_use(&attacker_entity);
+    }
+    assert!((target.get_health() - initial_health).abs() < f32::EPSILON);
+
+    attacker.stop_using_item();
+    target.movement.lock().set_last_known_client_movement(DVec3::ZERO);
+    attacker.start_using_item(InteractionHand::MainHand);
+    for _ in 0..20 {
+        attacker.tick_active_item_use(&attacker_entity);
+    }
+    assert!(target.get_health() < initial_health);
 }

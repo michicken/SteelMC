@@ -525,15 +525,11 @@ pub(crate) fn create_minecart(
     item_stack: &ItemStack,
     player: Option<&Player>,
 ) -> Result<SharedEntity, CreateMinecartError> {
-    // Plain, chest, furnace, TNT, hopper and command-block minecarts all
-    // share the generic AbstractMinecart implementation. Using the generic
-    // entity directly also covers variants whose registered factory is a
-    // structure-only stand-in (currently the chest minecart).
+    // These variants still use direct construction while their dedicated
+    // inventory and command behaviors are being implemented.
     let generic_variants = [
-        &vanilla_entities::MINECART,
         &vanilla_entities::CHEST_MINECART,
         &vanilla_entities::FURNACE_MINECART,
-        &vanilla_entities::TNT_MINECART,
         &vanilla_entities::HOPPER_MINECART,
         &vanilla_entities::COMMAND_BLOCK_MINECART,
     ];

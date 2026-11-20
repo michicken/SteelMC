@@ -1,4 +1,4 @@
-//! Shared nine-column container menus.
+//! Shared fixed-size container menus.
 //!
 //! Named for vanilla's `GENERIC_9Xn` menu types; vanilla calls this shared layout `ChestMenu`.
 //!
@@ -10,6 +10,7 @@
 use steel_registry::menu_type::MenuTypeRef;
 use steel_registry::vanilla_menu_types;
 
+use crate::block_entity::entities::DISPENSER_SLOTS;
 use crate::inventory::menu::GRID_WIDTH;
 use crate::inventory::prelude::*;
 use crate::player::player_inventory::PlayerInventory;
@@ -57,8 +58,42 @@ pub(crate) fn generic_9x_menu_with_kind(
         "Container rows must be between 1 and 6"
     );
 
-    let mut builder = MenuBuilder::new(menu_type_for_rows(rows), container_id);
-    let container_slots = builder.section(&container, rows * GRID_WIDTH);
+    generic_container_menu(
+        inventory,
+        container_id,
+        container,
+        menu_type_for_rows(rows),
+        rows * GRID_WIDTH,
+        kind,
+    )
+}
+
+/// Builds the nine-slot dispenser or dropper menu.
+pub(crate) fn generic_3x3_menu(
+    inventory: Shared<PlayerInventory>,
+    container_id: u8,
+    container: ContainerRef,
+) -> Menu {
+    generic_container_menu(
+        inventory,
+        container_id,
+        container.clone(),
+        &vanilla_menu_types::GENERIC_3X3,
+        DISPENSER_SLOTS,
+        Generic9xKind { container },
+    )
+}
+
+fn generic_container_menu(
+    inventory: Shared<PlayerInventory>,
+    container_id: u8,
+    container: ContainerRef,
+    menu_type: MenuTypeRef,
+    slot_count: usize,
+    kind: impl MenuKind + 'static,
+) -> Menu {
+    let mut builder = MenuBuilder::new(menu_type, container_id);
+    let container_slots = builder.section(&container, slot_count);
     let player = builder.player_inventory(&inventory);
 
     builder.route(container_slots, player.all(), FillDirection::Backward);
@@ -114,6 +149,19 @@ mod tests {
 
     use super::*;
     use crate::inventory::container::SimpleContainer;
+
+    #[test]
+    fn dispenser_menu_opens_a_nine_slot_container() {
+        let inventory = PlayerInventory::new().into_shared();
+        let container = SimpleContainer::new(9).into_shared();
+        let menu = generic_3x3_menu(inventory, 1, container.into());
+
+        assert_eq!(
+            menu.menu_type().map(|menu_type| &menu_type.key),
+            Some(&vanilla_menu_types::GENERIC_3X3.key),
+        );
+        assert_eq!(menu.behavior().slot_count(), 9 + 36);
+    }
 
     #[test]
     fn generic_9x_menu_uses_exactly_the_rows_requested_from_oversized_container() {

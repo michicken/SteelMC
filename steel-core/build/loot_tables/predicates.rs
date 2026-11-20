@@ -131,9 +131,18 @@ impl Compiler {
                 |sheared| quote! { entity.sheep_sheared == Some(#sheared) },
             ));
         }
-        if predicate.vehicle.is_some() {
-            // TODO: Resolve the entity's actual vehicle and evaluate its predicate.
-            checks.push(quote! { ctx.unsupported::<bool>("entity predicate minecraft:vehicle")? });
+        if let Some(vehicle) = &predicate.vehicle {
+            let check = Self::entity_predicate(vehicle);
+            checks.push(quote! {
+                match entity.entity.and_then(|entity| entity.vehicle()) {
+                    Some(vehicle) => {
+                        let equipment = crate::entity::loot_equipment(vehicle.as_ref());
+                        let entity = crate::entity::entity_loot_ref(vehicle.as_ref(), equipment.as_ref());
+                        #check
+                    }
+                    None => false,
+                }
+            });
         }
         Self::all(&checks)
     }
@@ -243,12 +252,8 @@ pub struct EntityPredicate {
     pub components: Option<EntityComponents>,
     #[serde(rename = "minecraft:type_specific/sheep")]
     pub sheep: Option<SheepPredicate>,
-    #[serde(
-        default,
-        rename = "minecraft:vehicle",
-        deserialize_with = "deferred_predicate"
-    )]
-    pub vehicle: Option<IgnoredAny>,
+    #[serde(rename = "minecraft:vehicle")]
+    pub vehicle: Option<Box<EntityPredicate>>,
     #[serde(
         default,
         rename = "minecraft:type_specific/cube_mob",

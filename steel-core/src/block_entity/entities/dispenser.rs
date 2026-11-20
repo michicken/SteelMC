@@ -8,14 +8,22 @@ use std::sync::{Arc, Weak};
 use simdnbt::borrow::BaseNbtCompound as BorrowedNbtCompound;
 use simdnbt::owned::NbtCompound;
 use steel_registry::block_entity_type::BlockEntityTypeRef;
+use steel_registry::data_components::vanilla_components::SeededContainerLoot;
 use steel_registry::vanilla_block_entity_types;
+use steel_utils::translations;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
+use text_components::TextComponent;
 
 use crate::block_entity::{
-    BlockEntity, BlockEntityBase, ImplicitComponentGetter,
+    BlockEntity, BlockEntityBase, ImplicitComponentGetter, RandomizableContainer,
+    container_properties::ContainerProperties,
     randomizable_container::RandomizableContainerStorage,
 };
+use crate::entity::Entity as _;
 use crate::inventory::lock::ContainerRef;
+use crate::loot::LootResult;
+use crate::nameable::Nameable;
+use crate::player::Player;
 use crate::world::World;
 
 /// Number of slots in a dispenser or dropper.
@@ -24,6 +32,7 @@ pub const DISPENSER_SLOTS: usize = 9;
 /// Shared inventory for dispensers and droppers.
 pub struct DispenserBlockEntity {
     storage: RandomizableContainerStorage,
+    properties: ContainerProperties,
 }
 
 unsafe impl DowncastType for DispenserBlockEntity {
@@ -57,7 +66,12 @@ impl DispenserBlockEntity {
                 pos,
                 state,
             ),
+            properties: ContainerProperties::default(),
         }
+    }
+
+    pub(crate) fn can_open(&self, player: &Player) -> bool {
+        (!player.is_spectator() || self.loot_table().is_none()) && self.properties.can_open(player)
     }
 }
 
@@ -67,10 +81,12 @@ impl BlockEntity for DispenserBlockEntity {
     }
 
     fn load_additional(&self, nbt: &BorrowedNbtCompound<'_>) {
+        self.properties.load(nbt);
         self.storage.load_additional(nbt);
     }
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
+        self.properties.save(nbt);
         self.storage.save_additional(nbt);
     }
 
@@ -79,6 +95,7 @@ impl BlockEntity for DispenserBlockEntity {
     }
 
     fn apply_implicit_components(&self, components: &mut ImplicitComponentGetter<'_>) {
+        self.properties.apply_components(components);
         self.storage.apply_implicit_components(components);
     }
 
@@ -86,5 +103,43 @@ impl BlockEntity for DispenserBlockEntity {
         Some(self.storage.container_ref.clone())
     }
 
+    fn as_nameable(&self) -> Option<&dyn Nameable> {
+        Some(self)
+    }
+
+    fn as_randomizable_container(&self) -> Option<&dyn RandomizableContainer> {
+        Some(self)
+    }
+
     fn tick(&self, _world: &Arc<World>) {}
+}
+
+impl RandomizableContainer for DispenserBlockEntity {
+    fn loot_table(&self) -> Option<SeededContainerLoot> {
+        self.storage.loot_table()
+    }
+
+    fn set_loot_table(&self, loot: Option<SeededContainerLoot>) {
+        self.storage.set_loot_table(loot);
+    }
+
+    fn unpack_loot_table(&self, player: Option<&Player>) -> LootResult<()> {
+        self.storage.unpack_loot_table(player)
+    }
+}
+
+impl Nameable for DispenserBlockEntity {
+    fn custom_name(&self) -> Option<TextComponent> {
+        self.properties.custom_name()
+    }
+
+    fn name(&self) -> TextComponent {
+        self.custom_name().unwrap_or_else(|| {
+            if self.get_type() == &vanilla_block_entity_types::DROPPER {
+                translations::CONTAINER_DROPPER.msg().component()
+            } else {
+                translations::CONTAINER_DISPENSER.msg().component()
+            }
+        })
+    }
 }

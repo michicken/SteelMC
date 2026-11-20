@@ -14,33 +14,40 @@ use std::sync::{Arc, Weak};
 
 use glam::DVec3;
 use steel_macros::block_behavior;
+use steel_protocol::packets::game::SoundSource;
 use steel_registry::blocks::BlockRef;
-use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{
-    BlockStateProperties, BoolProperty, Direction, EnumProperty,
+    BlockStateProperties, BoolProperty, Direction, EnumProperty, RailShape,
 };
+use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_block_entity_types;
-use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
+use steel_registry::vanilla_block_tags::BlockTag;
+use steel_registry::{
+    sound_events, vanilla_blocks, vanilla_custom_stats, vanilla_entities, vanilla_items,
+};
 use steel_utils::{
     BlockPos, BlockStateId, Downcast as _, random::Random as _, translations, types::UpdateFlags,
 };
-use text_components::TextComponent;
 
-use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
-use crate::behavior::{BlockHitResult, InteractionResult, InventoryAccess};
 use crate::behavior::BlockPlaceContext;
-use crate::inventory::menu::kinds::generic_9x_menu;
-use crate::player::Player;
-use crate::block_entity::{BLOCK_ENTITIES, BlockEntity as _, entities::DispenserBlockEntity};
+use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
+use crate::behavior::{BLOCK_BEHAVIORS, BlockHitResult, InteractionResult, InventoryAccess};
+use crate::block_entity::{
+    BLOCK_ENTITIES, BlockEntity as _, RandomizableContainer as _, entities::DispenserBlockEntity,
+};
+use crate::entity::entities::objects::vehicles::create_minecart;
 use crate::entity::entities::{
-    ArrowEntity, ItemEntity, MinecartEntity, PrimedTntEntity, SnowballEntity, ThrownEggEntity,
+    ArrowEntity, ItemEntity, PrimedTntEntity, SnowballEntity, ThrownEggEntity,
 };
 use crate::entity::{Entity, SharedEntity, next_entity_id};
 use crate::inventory::container::{Container, calculate_redstone_signal_from_containers};
 use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
+use crate::inventory::menu::kinds::generic_3x3_menu;
 use crate::inventory::transfer::insert_stack;
+use crate::nameable::Nameable as _;
+use crate::player::Player;
 use crate::world::{SignalGetter as _, World};
 
 pub(crate) const FACING: &EnumProperty<Direction> = &BlockStateProperties::FACING;
@@ -65,13 +72,12 @@ fn placement_state(block: BlockRef, context: &BlockPlaceContext<'_>) -> BlockSta
         .set_value(TRIGGERED, false)
 }
 
-
 /// Opens the 3x3 dispenser/dropper inventory with the player inventory below.
 fn open_three_by_three(
     world: &Arc<World>,
     pos: BlockPos,
     player: &Player,
-    title: TextComponent,
+    dropper: bool,
 ) -> InteractionResult {
     let Some(block_entity) = world.get_block_entity(pos) else {
         return InteractionResult::Pass;
@@ -79,12 +85,40 @@ fn open_three_by_three(
     let Some(dispenser) = block_entity.downcast_ref::<DispenserBlockEntity>() else {
         return InteractionResult::Pass;
     };
+    player.award_custom_stat(if dropper {
+        &vanilla_custom_stats::INSPECT_DROPPER
+    } else {
+        &vanilla_custom_stats::INSPECT_DISPENSER
+    });
+    let title = dispenser.name();
+    if !dispenser.can_open(player) {
+        if !player.is_spectator() {
+            player.send_overlay_message(
+                &translations::CONTAINER_IS_LOCKED
+                    .message([title])
+                    .component(),
+            );
+            world.play_sound_at(
+                &sound_events::BLOCK_CHEST_LOCKED,
+                SoundSource::Blocks,
+                pos.get_center(),
+                1.0,
+                1.0,
+                None,
+            );
+        }
+        return InteractionResult::Success;
+    }
+    if let Err(error) = dispenser.unpack_loot_table(Some(player)) {
+        log::error!("Could not unpack dispenser loot at {pos:?}: {error}");
+        return InteractionResult::Success;
+    }
     let Some(container) = dispenser.container_ref() else {
         return InteractionResult::Pass;
     };
     let inventory = Arc::clone(&player.inventory);
     player.open_menu(title, move |context| {
-        generic_9x_menu(inventory, context.container_id, container, 3)
+        generic_3x3_menu(inventory, context.container_id, container)
     });
     InteractionResult::Success
 }
@@ -153,6 +187,51 @@ fn sapling_state(item: steel_registry::items::ItemRef) -> Option<BlockStateId> {
     Some(block.default_state())
 }
 
+fn minecart_dispense_position(world: &World, pos: BlockPos, facing: Direction) -> Option<DVec3> {
+    const HORIZONTAL_DISPENSE_OFFSET: f64 = 1.125;
+    const LEVEL_RAIL_OFFSET: f64 = 0.1;
+    const SLOPED_RAIL_OFFSET: f64 = 0.6;
+
+    let front = pos.relative(facing);
+    let front_state = world.get_block_state(front);
+    let (rail, rail_below_front) = if front_state.get_block().has_tag(&BlockTag::RAILS) {
+        (front_state, false)
+    } else {
+        let below_state = world.get_block_state(front.below());
+        if !front_state.is_air() || !below_state.get_block().has_tag(&BlockTag::RAILS) {
+            return None;
+        }
+        (below_state, true)
+    };
+
+    let shape = if BLOCK_BEHAVIORS
+        .get_behavior(rail.get_block())
+        .as_rail()
+        .is_some()
+    {
+        rail.get_value(&BlockStateProperties::RAIL_SHAPE)
+    } else {
+        RailShape::NorthSouth
+    };
+    let y_offset = if (!rail_below_front || facing != Direction::Down) && shape.is_slope() {
+        SLOPED_RAIL_OFFSET
+    } else {
+        LEVEL_RAIL_OFFSET
+    };
+    let y_offset = if rail_below_front {
+        y_offset - 1.0
+    } else {
+        y_offset
+    };
+    let center = pos.get_center();
+    let (dx, dy, dz) = facing.offset();
+    Some(DVec3::new(
+        center.x + f64::from(dx) * HORIZONTAL_DISPENSE_OFFSET,
+        f64::from(pos.y()) + f64::from(dy) + y_offset,
+        center.z + f64::from(dz) * HORIZONTAL_DISPENSE_OFFSET,
+    ))
+}
+
 /// Removes the first non-empty stack and either transfers it (dropper) or ejects it.
 fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: bool) {
     let facing = state.get_value(FACING);
@@ -217,13 +296,19 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
         } else if stack.item == &*vanilla_items::CHEST_MINECART {
             Some(SpecialDispense::Minecart(&vanilla_entities::CHEST_MINECART))
         } else if stack.item == &*vanilla_items::FURNACE_MINECART {
-            Some(SpecialDispense::Minecart(&vanilla_entities::FURNACE_MINECART))
+            Some(SpecialDispense::Minecart(
+                &vanilla_entities::FURNACE_MINECART,
+            ))
         } else if stack.item == &*vanilla_items::TNT_MINECART {
             Some(SpecialDispense::Minecart(&vanilla_entities::TNT_MINECART))
         } else if stack.item == &*vanilla_items::HOPPER_MINECART {
-            Some(SpecialDispense::Minecart(&vanilla_entities::HOPPER_MINECART))
+            Some(SpecialDispense::Minecart(
+                &vanilla_entities::HOPPER_MINECART,
+            ))
         } else if stack.item == &*vanilla_items::COMMAND_BLOCK_MINECART {
-            Some(SpecialDispense::Minecart(&vanilla_entities::COMMAND_BLOCK_MINECART))
+            Some(SpecialDispense::Minecart(
+                &vanilla_entities::COMMAND_BLOCK_MINECART,
+            ))
         } else if sapling_state(stack.item).is_some() {
             Some(SpecialDispense::Sapling)
         } else {
@@ -253,13 +338,19 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
                     }
                 }
                 SpecialDispense::Minecart(entity_type) => {
-                    let entity: SharedEntity = Arc::new(MinecartEntity::new(
-                        entity_type,
-                        next_entity_id(),
-                        front.get_center(),
-                        Arc::downgrade(world),
-                    ));
-                    world.try_add_entity(entity).is_ok()
+                    if let Some(position) = minecart_dispense_position(world, pos, facing) {
+                        let Ok(entity) =
+                            create_minecart(world, position, entity_type, &stack, None)
+                        else {
+                            return;
+                        };
+                        if world.try_add_entity(entity).is_err() {
+                            return;
+                        }
+                        true
+                    } else {
+                        false
+                    }
                 }
             };
             if spawned {
@@ -272,7 +363,7 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
                     }
                 }
             } else {
-                eject_item(world, pos, facing, stack);
+                eject_item(world, pos, facing, stack.copy_with_count(1));
                 if let Ok(mut guard) = ContainerLockGuard::lock_all(&[&own]) {
                     guard.remove_item(own_id, slot, 1);
                 }
@@ -340,12 +431,7 @@ macro_rules! impl_dispenser_block {
                 _hit_result: &BlockHitResult,
                 _inv: &mut InventoryAccess,
             ) -> InteractionResult {
-                open_three_by_three(
-                    world,
-                    pos,
-                    player,
-                    translations::CONTAINER_DISPENSER.msg().component(),
-                )
+                open_three_by_three(world, pos, player, $dropper)
             }
 
             fn handle_neighbor_changed(
@@ -642,14 +728,26 @@ mod tests {
     #[test]
     fn dispenser_shoots_wind_charge_and_launched_firework() {
         for (item, entity_type, name) in [
-            (&*vanilla_items::WIND_CHARGE, &vanilla_entities::WIND_CHARGE, "wind_charge"),
-            (&*vanilla_items::FIREWORK_ROCKET, &vanilla_entities::FIREWORK_ROCKET, "firework"),
+            (
+                &*vanilla_items::WIND_CHARGE,
+                &vanilla_entities::WIND_CHARGE,
+                "wind_charge",
+            ),
+            (
+                &*vanilla_items::FIREWORK_ROCKET,
+                &vanilla_entities::FIREWORK_ROCKET,
+                "firework",
+            ),
             (
                 &*vanilla_items::EXPERIENCE_BOTTLE,
                 &vanilla_entities::EXPERIENCE_BOTTLE,
                 "experience_bottle",
             ),
-            (&*vanilla_items::FIRE_CHARGE, &vanilla_entities::SMALL_FIREBALL, "fire_charge"),
+            (
+                &*vanilla_items::FIRE_CHARGE,
+                &vanilla_entities::SMALL_FIREBALL,
+                "fire_charge",
+            ),
         ] {
             let fixture = fixture(match name {
                 "wind_charge" => "dispenser_wind_charge",
@@ -659,8 +757,17 @@ mod tests {
             });
             let state = facing_down(&vanilla_blocks::DISPENSER);
             place_machine(&fixture.world, state, false);
-            set_slot(&fixture.world, DISPENSER_POS, 0, ItemStack::with_count(item, 2));
-            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(state, &fixture.world, DISPENSER_POS);
+            set_slot(
+                &fixture.world,
+                DISPENSER_POS,
+                0,
+                ItemStack::with_count(item, 2),
+            );
+            DispenserBlock::new(&vanilla_blocks::DISPENSER).tick(
+                state,
+                &fixture.world,
+                DISPENSER_POS,
+            );
 
             assert_eq!(
                 entities_in_front(&fixture.world, entity_type),
@@ -1307,8 +1414,7 @@ mod tests {
         let fixture = fixture("dispenser_random_slot");
         let state = facing_down(&vanilla_blocks::DISPENSER);
         place_machine(&fixture.world, state, false);
-        *fixture.world.loot_random.lock() =
-            RandomSource::Legacy(LegacyRandom::from_seed(42));
+        *fixture.world.loot_random.lock() = RandomSource::Legacy(LegacyRandom::from_seed(42));
         set_slot(
             &fixture.world,
             DISPENSER_POS,
@@ -1376,10 +1482,11 @@ mod tests {
         let fixture = fixture("dispenser_tnt_rule_off");
         let state = facing_down(&vanilla_blocks::DISPENSER);
         place_machine(&fixture.world, state, false);
-        assert!(fixture.world.set_game_rule(
-            &steel_registry::vanilla_game_rules::TNT_EXPLODES,
-            false
-        ));
+        assert!(
+            fixture
+                .world
+                .set_game_rule(&steel_registry::vanilla_game_rules::TNT_EXPLODES, false)
+        );
         set_slot(
             &fixture.world,
             DISPENSER_POS,
@@ -1612,7 +1719,11 @@ mod tests {
             .world
             .get_entities_in_aabb(&WorldAabb::new(0.0, -1.0, 0.0, 1.0, 0.0, 1.0))
             .into_iter()
-            .find(|entity| entity.downcast_ref::<crate::entity::entities::DonkeyEntity>().is_some())
+            .find(|entity| {
+                entity
+                    .downcast_ref::<crate::entity::entities::DonkeyEntity>()
+                    .is_some()
+            })
             .expect("donkey");
         assert!(
             entity
@@ -1620,7 +1731,10 @@ mod tests {
                 .expect("donkey")
                 .has_chest()
         );
-        assert_eq!(Entity::entity_type(entity.as_ref()), &vanilla_entities::DONKEY);
+        assert_eq!(
+            Entity::entity_type(entity.as_ref()),
+            &vanilla_entities::DONKEY
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod chest_minecart;
 mod minecart;
 mod minecart_behavior;
 mod spawner_minecart;
+mod tnt_minecart;
 mod vehicle_entity;
 
 pub use abstract_minecart::{AbstractMinecart, AbstractMinecartBase};

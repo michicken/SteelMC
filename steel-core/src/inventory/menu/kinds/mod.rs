@@ -24,6 +24,7 @@ pub use crafting_menu::{CraftingKind, crafting};
 pub use enchantment_menu::{EnchantmentKind, enchantment};
 pub use ender_chest_menu::{EnderChestKind, ender_chest};
 pub use furnace_menu::{FurnaceMenuKind, furnace_menu};
+pub(crate) use generic_9x_menu::generic_3x3_menu;
 pub use generic_9x_menu::{Generic9xKind, generic_9x_menu};
 pub use grindstone_menu::{GrindstoneKind, grindstone};
 pub use inventory_menu::{INVENTORY_MENU_CONTAINER_ID, InventoryKind, inventory_menu};

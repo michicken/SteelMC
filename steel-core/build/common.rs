@@ -109,6 +109,7 @@ impl GeneratedImports {
 pub(crate) struct DiscoveredObject {
     pub(crate) struct_name: String,
     pub(crate) class_name: String,
+    class_aliases: Vec<String>,
     pub(crate) fields: Vec<JsonArgField>,
     pub(crate) spawn_rule: bool,
     /// How many sub-entities the type owns, from `parts = N`. Declared on the struct, not
@@ -139,6 +140,7 @@ pub(crate) fn parse_object_behavior(
     Some(DiscoveredObject {
         struct_name: s.ident.to_string(),
         class_name,
+        class_aliases: args.class_aliases,
         fields,
         spawn_rule: args.spawn_rule,
         part_count: args.part_count,
@@ -415,6 +417,7 @@ pub(crate) fn generate_arg(
 #[derive(Default)]
 struct BehaviorArgs {
     class_name: Option<String>,
+    class_aliases: Vec<String>,
     spawn_rule: bool,
     part_count: u32,
 }
@@ -432,6 +435,9 @@ fn parse_behavior_args(attr: &syn::Attribute, attribute_name: &str) -> BehaviorA
             let value = meta.value()?;
             let lit: syn::LitStr = value.parse()?;
             args.class_name = Some(lit.value());
+        } else if attribute_name == "entity_behavior" && meta.path.is_ident("class_alias") {
+            args.class_aliases
+                .push(meta.value()?.parse::<syn::LitStr>()?.value());
         } else if meta.path.is_ident("spawn_rule") {
             args.spawn_rule = true;
         } else if meta.path.is_ident("parts") {
@@ -473,7 +479,19 @@ pub(crate) fn scan_object_behaviors_with_pattern(
                 && let Some(info) = parse_object_behavior(s, attribute_name)
             {
                 let class_name = info.class_name.clone();
-                discovered.insert(class_name, info);
+                for alias in &info.class_aliases {
+                    let mut alias_info = info.clone();
+                    alias_info.class_name.clone_from(alias);
+                    assert!(
+                        discovered.insert(alias.clone(), alias_info).is_none(),
+                        "Multiple {attribute_name} declarations for class {alias}"
+                    );
+                }
+                let previous = discovered.insert(class_name.clone(), info);
+                assert!(
+                    attribute_name != "entity_behavior" || previous.is_none(),
+                    "Multiple {attribute_name} declarations for class {class_name}"
+                );
             }
         }
     }

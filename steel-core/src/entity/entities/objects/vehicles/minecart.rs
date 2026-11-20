@@ -8,6 +8,8 @@ use simdnbt::owned::NbtCompound;
 
 use steel_macros::entity_behavior;
 use steel_registry::entity_type::EntityTypeRef;
+use steel_registry::fluid::FluidState;
+use steel_registry::vanilla_blocks;
 use steel_registry::vanilla_entity_data::MinecartEntityData;
 use steel_registry::{items::ItemRef, vanilla_entities, vanilla_items};
 use steel_utils::axis::Axis;
@@ -20,6 +22,7 @@ use super::abstract_minecart::{
     AbstractMinecart, AbstractMinecartBase, minecart_relative_portal_position,
 };
 use super::minecart_behavior::MinecartBehavior;
+use super::tnt_minecart::TntMinecart;
 use super::vehicle_entity::{
     VEHICLE_DIMENSION_CHANGING_DELAY, VEHICLE_HURT_DURATION_TICKS, VehicleEntity,
     vehicle_ignores_explosion,
@@ -36,12 +39,13 @@ use crate::world::{Explosion, World};
 const ACTIVATOR_RAIL_DAMAGE: f32 = 50.0;
 
 /// A minecart entity.
-#[entity_behavior(class = "Minecart")]
+#[entity_behavior(class = "Minecart", class_alias = "MinecartTNT")]
 pub struct MinecartEntity {
     base: EntityBase,
     entity_type: EntityTypeRef,
     entity_data: SyncMutex<MinecartEntityData>,
     minecart_base: AbstractMinecartBase,
+    tnt: Option<Box<TntMinecart>>,
 }
 
 // SAFETY: This key is owned by Steel and uniquely identifies `MinecartEntity`.
@@ -58,6 +62,8 @@ impl MinecartEntity {
             entity_type,
             entity_data: SyncMutex::new(MinecartEntityData::new()),
             minecart_base: AbstractMinecartBase::new(),
+            tnt: (entity_type == &vanilla_entities::TNT_MINECART)
+                .then(|| Box::new(TntMinecart::new())),
         }
     }
 
@@ -69,6 +75,8 @@ impl MinecartEntity {
             entity_type,
             entity_data: SyncMutex::new(MinecartEntityData::new()),
             minecart_base: AbstractMinecartBase::new(),
+            tnt: (entity_type == &vanilla_entities::TNT_MINECART)
+                .then(|| Box::new(TntMinecart::new())),
         }
     }
 }
@@ -128,6 +136,19 @@ impl VehicleEntity for MinecartEntity {
             &vanilla_items::MINECART
         }
     }
+
+    fn should_source_destroy(&self, source: &DamageSource) -> bool {
+        self.tnt.is_some() && TntMinecart::damage_ignites(source)
+    }
+
+    fn vehicle_destroy(&self, world: &World, source: &DamageSource) {
+        if let Some(tnt) = &self.tnt
+            && tnt.handle_destroy(self, world, source)
+        {
+            return;
+        }
+        self.vehicle_destroy_with_item(world, self.vehicle_drop_item());
+    }
 }
 
 impl AbstractMinecart for MinecartEntity {
@@ -136,7 +157,15 @@ impl AbstractMinecart for MinecartEntity {
     }
 
     fn is_rideable(&self) -> bool {
-        true
+        self.tnt.is_none()
+    }
+
+    fn default_display_block_state(&self) -> BlockStateId {
+        if self.tnt.is_some() {
+            vanilla_blocks::TNT.default_state()
+        } else {
+            vanilla_blocks::AIR.default_state()
+        }
     }
 
     fn custom_display_block(&self) -> Option<BlockStateId> {
@@ -173,8 +202,12 @@ impl AbstractMinecart for MinecartEntity {
             .set(value);
     }
 
-    fn activate_minecart(&self, _world: &World, _pos: BlockPos, powered: bool) {
+    fn activate_minecart(&self, world: &World, _pos: BlockPos, powered: bool) {
         if !powered {
+            return;
+        }
+        if let Some(tnt) = &self.tnt {
+            tnt.prime(self, world, None);
             return;
         }
         if self.is_vehicle() {
@@ -196,7 +229,7 @@ impl Entity for MinecartEntity {
         _hand: InteractionHand,
         _location: DVec3,
     ) -> InteractionResult {
-        if player.is_secondary_use_active() || self.is_vehicle() {
+        if !self.is_rideable() || player.is_secondary_use_active() || self.is_vehicle() {
             return InteractionResult::Pass;
         }
 
@@ -223,9 +256,14 @@ impl Entity for MinecartEntity {
     }
 
     fn tick(self: Arc<Self>) {
-        let entity = self.into_shared_entity();
+        let entity = Arc::clone(&self).into_shared_entity();
         if let Some(minecart) = entity.as_abstract_minecart() {
             minecart.tick_minecart(&entity);
+        }
+        if let Some(tnt) = &self.tnt
+            && !self.is_removed()
+        {
+            tnt.tick(&self, &entity);
         }
     }
 
@@ -298,7 +336,59 @@ impl Entity for MinecartEntity {
     }
 
     fn hurt(&self, world: &World, source: &DamageSource, amount: f32) -> bool {
+        if let Some(tnt) = &self.tnt {
+            tnt.handle_projectile_hit(self, world, source);
+        }
         self.vehicle_hurt(world, source, amount)
+    }
+
+    fn cause_fall_damage(
+        self: Arc<Self>,
+        fall_distance: f64,
+        damage_modifier: f32,
+        source: &DamageSource,
+    ) -> bool {
+        if let Some(tnt) = &self.tnt {
+            tnt.handle_fall(&self, fall_distance);
+        }
+        if !self.is_fall_damage_immune() {
+            self.propagate_fall_to_passengers(fall_distance, damage_modifier, source);
+        }
+        false
+    }
+
+    fn block_explosion_resistance(
+        &self,
+        _explosion: &dyn Explosion,
+        world: &World,
+        pos: BlockPos,
+        state: BlockStateId,
+        _fluid: FluidState,
+        resistance: f32,
+    ) -> f32 {
+        if self
+            .tnt
+            .as_ref()
+            .is_some_and(|tnt| tnt.protects_rail(world, pos, state))
+        {
+            0.0
+        } else {
+            resistance
+        }
+    }
+
+    fn should_block_explode(
+        &self,
+        _explosion: &dyn Explosion,
+        world: &World,
+        pos: BlockPos,
+        state: BlockStateId,
+        _power: f32,
+    ) -> bool {
+        !self
+            .tnt
+            .as_ref()
+            .is_some_and(|tnt| tnt.protects_rail(world, pos, state))
     }
 
     fn ignore_explosion(&self, explosion: &dyn Explosion) -> bool {
@@ -311,10 +401,16 @@ impl Entity for MinecartEntity {
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
         self.save_abstract_minecart_data(nbt);
+        if let Some(tnt) = &self.tnt {
+            tnt.save(nbt);
+        }
     }
 
     fn load_additional(&self, nbt: BorrowedNbtCompoundView<'_, '_>) {
         self.load_abstract_minecart_data(nbt);
+        if let Some(tnt) = &self.tnt {
+            tnt.load(nbt);
+        }
     }
 
     // TODO: Implement getPickResult.
