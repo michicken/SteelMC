@@ -123,6 +123,8 @@ pub(crate) fn convert_to(
 fn convert_single(from: &dyn Mob, to: &dyn Mob, to_arc: &SharedEntity, params: ConversionParams) {
     let root_passenger = from.first_passenger();
 
+    // The replacement mob inherits the source's persistent identity.
+    to.base().set_uuid(from.uuid());
     copy_position(from, to);
     to.set_velocity(from.velocity());
 
@@ -364,6 +366,11 @@ mod tests {
             .expect("pig should convert to cow");
 
         assert_eq!(cow.entity_type(), &vanilla_entities::COW);
+        assert_eq!(
+            cow.uuid(),
+            pig.uuid(),
+            "single conversion inherits the source mob's UUID"
+        );
         assert!(pig.is_removed(), "single conversion discards the source");
         assert!(
             world_fixture.world.get_entity_by_id(cow.id()).is_some(),

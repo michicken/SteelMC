@@ -395,7 +395,7 @@ pub struct EntityBase {
     /// Unique network ID for this entity (session-local).
     id: i32,
     /// Persistent UUID for this entity.
-    uuid: Uuid,
+    uuid: SyncMutex<Uuid>,
     /// The world this entity is in.
     world: SyncMutex<Weak<World>>,
     /// Current vanilla movement state.
@@ -464,7 +464,7 @@ impl EntityBase {
             damage_history: DamageHistoryBinding::default(),
             generation: EntityGeneration::next(),
             id,
-            uuid,
+            uuid: SyncMutex::new(uuid),
             world: SyncMutex::new(world),
             state: SyncMutex::new(state),
             save_data: SyncMutex::new(EntityBaseSaveData::new()),
@@ -512,8 +512,16 @@ impl EntityBase {
 
     /// Gets the entity's UUID.
     #[inline]
-    pub const fn uuid(&self) -> Uuid {
-        self.uuid
+    pub fn uuid(&self) -> Uuid {
+        *self.uuid.lock()
+    }
+
+    /// Replaces the entity's persistent UUID. Only used when an entity must
+    /// adopt an existing identity (e.g. mob conversion that inherits the
+    /// source's UUID).
+    #[inline]
+    pub fn set_uuid(&self, uuid: Uuid) {
+        *self.uuid.lock() = uuid;
     }
 
     /// Gets the entity's current position.
