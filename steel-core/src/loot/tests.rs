@@ -489,3 +489,70 @@ fn missing_enchantment_component_skips_provider_and_component_creation() {
     assert!(!items[0].has(ENCHANTMENTS));
     assert_eq!(rng.next_i64(), random(12345).next_i64());
 }
+
+#[test]
+fn tall_grass_location_condition_checks_the_other_half() {
+    use crate::{
+        behavior::init_behaviors,
+        test_support::{fresh_test_world, insert_ready_full_chunk},
+    };
+    use steel_registry::{
+        blocks::{
+            block_state_ext::BlockStateExt,
+            properties::{BlockStateProperties, DoubleBlockHalf},
+        },
+        vanilla_blocks,
+    };
+    use steel_utils::{BlockPos, ChunkPos, types::UpdateFlags};
+
+    init_vanilla_registry();
+    init_behaviors();
+    let fixture = fresh_test_world("tall_grass_loot_location");
+    let world = &fixture.world;
+    let pos = BlockPos::new(8, 64, 8);
+    insert_ready_full_chunk(world, ChunkPos::from_block_pos(pos));
+    let lower = vanilla_blocks::TALL_GRASS.default_state().set_value(
+        &BlockStateProperties::DOUBLE_BLOCK_HALF,
+        DoubleBlockHalf::Lower,
+    );
+    let upper = lower.set_value(
+        &BlockStateProperties::DOUBLE_BLOCK_HALF,
+        DoubleBlockHalf::Upper,
+    );
+    let tool = ItemStack::new(&vanilla_items::SHEARS);
+    assert!(world.set_block(pos, lower, UpdateFlags::UPDATE_NONE));
+    assert!(world.set_block(pos.above(), upper, UpdateFlags::UPDATE_NONE));
+    for (block_pos, state) in [(pos, lower), (pos.above(), upper)] {
+        let mut rng = random(42);
+        let origin = DVec3::new(
+            f64::from(block_pos.0.x) + 0.5,
+            f64::from(block_pos.0.y) + 0.5,
+            f64::from(block_pos.0.z) + 0.5,
+        );
+        let mut ctx = LootContext::new(&mut rng)
+            .with_world(world)
+            .with_origin(origin)
+            .with_block_state(state)
+            .with_tool(&tool);
+        let drops = vanilla_loot_tables::BLOCKS_TALL_GRASS
+            .get_random_items(&mut ctx)
+            .expect("location condition must evaluate");
+        assert_eq!(drops.iter().map(ItemStack::count).sum::<i32>(), 2);
+        assert!(drops.iter().all(|item| item.is(&vanilla_items::SHORT_GRASS)));
+    }
+    assert!(world.set_block(
+        pos.above(),
+        vanilla_blocks::AIR.default_state(),
+        UpdateFlags::UPDATE_NONE
+    ));
+    let mut rng = random(42);
+    let mut ctx = LootContext::new(&mut rng)
+        .with_world(world)
+        .with_origin(DVec3::new(8.5, 64.5, 8.5))
+        .with_block_state(lower)
+        .with_tool(&tool);
+    let drops = vanilla_loot_tables::BLOCKS_TALL_GRASS
+        .get_random_items(&mut ctx)
+        .expect("missing other half must not fail");
+    assert!(drops.is_empty());
+}
