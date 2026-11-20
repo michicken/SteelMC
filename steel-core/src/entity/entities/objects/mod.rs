@@ -1,6 +1,7 @@
 //! Non-living entity implementations grouped by behavior.
 
 pub mod aquatic;
+pub mod decorations;
 pub mod armor;
 pub mod display_ui;
 pub mod effects;

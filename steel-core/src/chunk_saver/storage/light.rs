@@ -156,7 +156,7 @@ impl ChunkStorage {
         if let Some(value) = homogeneous_packed_light_value(&bytes) {
             Some(LightSectionData::homogeneous(value))
         } else {
-            Some(LightSectionData::Packed(bytes))
+            Some(LightSectionData::from_packed(bytes))
         }
     }
 }

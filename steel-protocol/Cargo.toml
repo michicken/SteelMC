@@ -38,7 +38,7 @@ aes.workspace = true
 cfb8.workspace = true
 
 # Compression
-flate2.workspace = true
+flate2 = { workspace = true, features = ["zlib-rs"] }
 
 # Utilities
 replace_with.workspace = true

@@ -38,19 +38,22 @@ use crate::world::tick_scheduler::{
 };
 use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 
-pub(crate) fn empty_postprocessing(height: i32) -> Box<[Vec<u16>]> {
+fn empty_postprocessing(height: i32) -> Box<[Vec<u16>]> {
     let section_count = (height / 16) as usize;
     (0..section_count).map(|_| Vec::new()).collect()
 }
 
-pub(crate) fn postprocessing_from_disk(
+fn postprocessing_from_disk(
     height: i32,
     mut postprocessing: Vec<Vec<u16>>,
-) -> Box<[Vec<u16>]> {
+) -> Option<Box<[Vec<u16>]>> {
     let section_count = (height / 16) as usize;
-    postprocessing.resize_with(section_count, Vec::new);
     postprocessing.truncate(section_count);
-    postprocessing.into_boxed_slice()
+    if postprocessing.iter().all(Vec::is_empty) {
+        return None;
+    }
+    postprocessing.resize_with(section_count, Vec::new);
+    Some(postprocessing.into_boxed_slice())
 }
 
 #[derive(Default)]
@@ -99,7 +102,7 @@ pub struct Chunk {
     /// References to structures from nearby origin chunks.
     pub structure_references: SyncRwLock<StructureReferenceMap>,
     /// Section-indexed packed offsets that need vanilla postprocessing after promotion.
-    pub postprocessing: SyncMutex<Box<[Vec<u16>]>>,
+    pub(crate) postprocessing: SyncMutex<Option<Box<[Vec<u16>]>>>,
     /// Stable block and fluid scheduled-tick storage retained through Full promotion.
     pub(crate) scheduled_ticks: Arc<ChunkTickContainer>,
     /// Vanilla skylight source edge cache for this chunk.
@@ -140,7 +143,7 @@ impl Chunk {
             entities: EntityStorage::new(),
             structure_starts: SyncRwLock::new(FxHashMap::default()),
             structure_references: SyncRwLock::new(FxHashMap::default()),
-            postprocessing: SyncMutex::new(empty_postprocessing(height)),
+            postprocessing: SyncMutex::new(None),
             scheduled_ticks: Arc::new(ChunkTickContainer::new_proto(ChunkTickLists::new(
                 BlockTickList::new_pending(),
                 FluidTickList::new_pending(),
@@ -589,8 +592,19 @@ impl Chunk {
 
         let section_index = self.get_section_index(y);
         let packed = Self::pack_postprocessing_offset(pos);
-        self.postprocessing.lock()[section_index].push(packed);
+        self.postprocessing
+            .lock()
+            .get_or_insert_with(|| empty_postprocessing(self.height))[section_index]
+            .push(packed);
         self.mark_unsaved();
+    }
+
+    /// Snapshots postprocessing offsets in the persisted section order.
+    pub(crate) fn postprocessing_for_serialization(&self) -> Vec<Vec<u16>> {
+        self.postprocessing.lock().as_deref().map_or_else(
+            || empty_postprocessing(self.height).into_vec(),
+            <[Vec<u16>]>::to_vec,
+        )
     }
 
     /// Gets the section index for a given Y coordinate.

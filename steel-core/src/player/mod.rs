@@ -461,6 +461,16 @@ impl Player {
         let Some(user) = LivingEntityRef::new(entity) else {
             panic!("active item use requires a living entity");
         };
+        // Spears use a kinetic charge instead of a release hook: damage is
+        // evaluated every contact window while the use button is held.
+        if let Some(kinetic) = item.get_kinetic_weapon().cloned() {
+            self.tick_kinetic_weapon(
+                entity,
+                &item,
+                &kinetic,
+                active.duration() - active.remaining_ticks(),
+            );
+        }
         behavior.on_use_tick(&world, user, &mut item, active.remaining_ticks());
         let use_on_release = behavior.use_on_release(&item);
         self.inventory.lock().write_use_item(hand, item);

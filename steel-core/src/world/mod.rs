@@ -330,7 +330,7 @@ pub struct World {
     /// out of the entity manager.
     entity_parts: SyncMutex<FxHashMap<i32, Arc<dyn PartEntity>>>,
     /// The End dragon fight state for this level (unused outside the End).
-    end_fight: crate::entity::end_fight::EndFight,
+    pub(crate) end_fight: crate::entity::end_fight::EndFight,
 }
 
 impl World {
@@ -655,9 +655,9 @@ impl World {
 
         if runs_normally
             && self.natural_spawning_enabled.load(std::sync::atomic::Ordering::Relaxed)
-            && tick_count % 20 == 0
+            && tick_count % 10 == 0
         {
-            crate::entity::natural_spawn::tick_natural_spawns(self, 3);
+            crate::entity::natural_spawn::tick_natural_spawns(self, 12);
         }
 
         if runs_normally && self.dimension_type == &steel_registry::vanilla_dimension_types::THE_END {

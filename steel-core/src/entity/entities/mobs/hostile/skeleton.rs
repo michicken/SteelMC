@@ -9,8 +9,9 @@ use steel_macros::entity_behavior;
 use steel_protocol::packets::game::SoundSource;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
+use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_entity_data::SkeletonEntityData;
-use steel_registry::{sound_events, vanilla_attributes, vanilla_entities};
+use steel_registry::{sound_events, vanilla_attributes, vanilla_entities, vanilla_items};
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
 
@@ -20,6 +21,7 @@ use crate::entity::ai::goal::{
 };
 use crate::entity::entities::objects::projectiles::ArrowEntity;
 use crate::entity::damage::DamageSource;
+use crate::inventory::equipment::EquipmentSlot;
 use crate::entity::{
     DefaultEntityPush, Entity, EntityBase, EntityBaseLoad, EntityMovementEmission, EntityPose,
     EntitySpawnReason, EntitySyncedData, LivingEntity, LivingEntityBase, Mob, MobBase, Monster,
@@ -31,6 +33,9 @@ use crate::world::{LevelReader, World};
 const DEFAULT_STEP_HEIGHT: f32 = 0.6;
 const XP_REWARD: i32 = 5;
 const BOW_RANGE_SQR: f64 = 15.0 * 15.0;
+/// Vanilla `RangedBowAttackGoal` draws for 20 ticks, then waits its
+/// `attackIntervalMin` (20 ticks) before starting the next draw.
+const BOW_DRAW_TICKS: i32 = 20;
 const BOW_COOLDOWN_TICKS: i32 = 20;
 const ARROW_SPEED: f64 = 2.0;
 const ARROW_ARC_LIFT: f64 = 0.12;
@@ -39,11 +44,16 @@ const ARROW_ARC_LIFT: f64 = 0.12;
 /// every 20 ticks at the current target.
 struct BowAttackGoal {
     cooldown: i32,
+    draw_ticks: i32,
 }
 
 impl BowAttackGoal {
     const fn new() -> Self {
-        Self { cooldown: 0 }
+        // Do not fire on the first AI tick. Vanilla needs a full draw first.
+        Self {
+            cooldown: BOW_DRAW_TICKS,
+            draw_ticks: 0,
+        }
     }
 
     fn fire(&mut self, mob: &dyn PathfinderMob, entity: &SharedEntity) -> Option<SharedEntity> {
@@ -92,9 +102,22 @@ impl Goal for BowAttackGoal {
     fn tick(&mut self, mob: &dyn PathfinderMob, entity: &SharedEntity) {
         if self.cooldown > 0 {
             self.cooldown -= 1;
+            self.draw_ticks = 0;
+            return;
+        }
+        if mob.target().is_none() {
+            self.draw_ticks = 0;
+            return;
+        }
+        // Draw first, release on the 20th tick, then enter the 20-tick
+        // cooldown. This produces vanilla's 40-tick cycle instead of the
+        // previous one-arrow-every-20-ticks behavior.
+        self.draw_ticks = self.draw_ticks.saturating_add(1);
+        if self.draw_ticks < BOW_DRAW_TICKS {
             return;
         }
         if self.fire(mob, entity).is_some() {
+            self.draw_ticks = 0;
             self.cooldown = BOW_COOLDOWN_TICKS;
         }
     }
@@ -166,6 +189,12 @@ impl SkeletonEntity {
         mob_base.set_xp_reward(XP_REWARD);
         let mut entity_data = SkeletonEntityData::new();
         living_base.initialize_synced_data(&mut entity_data);
+        // Vanilla skeletons spawn holding a bow. Without this the ranged
+        // goal still fired arrows but the model showed an empty hand.
+        living_base
+            .equipment()
+            .lock()
+            .set(EquipmentSlot::MainHand, ItemStack::new(&vanilla_items::BOW));
 
         {
             let mut goal_selector = mob_base.goal_selector().lock();

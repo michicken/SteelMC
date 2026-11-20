@@ -180,6 +180,8 @@ impl MenuKind for MerchantKind {
             && let Some(entity) = world.get_entity_by_id(self.villager_id)
             && let Some(villager) = entity.downcast_ref::<VillagerEntity>()
         {
+            let villager_level = villager.villager_level();
+            let villager_xp = villager.trade_xp();
             let offers = villager
                 .trade_offers()
                 .iter()
@@ -189,22 +191,28 @@ impl MenuKind for MerchantKind {
                         .first()
                         .cloned()
                         .unwrap_or_else(ItemStack::empty),
+                    result: offer.gives.clone(),
                     cost_b: offer
                         .wants
                         .get(1)
-                        .cloned()
-                        .unwrap_or_else(ItemStack::empty),
-                    result: offer.gives.clone(),
-                    reward_experience: offer.xp > 0,
-                    villager_xp: offer.xp,
+                        .filter(|stack| !stack.is_empty())
+                        .cloned(),
+                    out_of_stock: offer.is_disabled(),
+                    uses: offer.uses,
+                    max_uses: offer.max_uses,
+                    xp: offer.xp,
                     special_price: offer.special_price,
-                    demand: offer.demand,
                     price_multiplier: offer.price_multiplier,
+                    demand: offer.demand,
                 })
                 .collect();
             player.send_packet(CMerchantOffers {
                 container_id: i32::from(behavior.container_id()),
                 offers,
+                villager_level,
+                villager_xp,
+                show_progress: villager_level < 5,
+                can_restock: true,
             });
         }
         let preview = self

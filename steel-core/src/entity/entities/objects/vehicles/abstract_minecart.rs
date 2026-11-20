@@ -17,6 +17,7 @@ use steel_utils::locks::SyncMutex;
 use steel_utils::nbt::NbtNumeric;
 use steel_utils::{BlockPos, BlockStateId};
 
+use super::minecart::MinecartEntity;
 use super::minecart_behavior::MinecartBehavior;
 use super::vehicle_entity::VehicleEntity;
 use crate::block_entity::block_state_nbt;
@@ -24,6 +25,7 @@ use crate::entity::reset_forward_direction_of_relative_portal_position;
 use crate::entity::{Entity, EntityMovementEmission};
 use crate::entity::{
     EntitySpawnError, SharedEntity, apply_item_stack_components, create_entity_instance,
+    next_entity_id,
 };
 use crate::physics::{MoveResult, MoverType};
 use crate::player::Player;
@@ -523,11 +525,31 @@ pub(crate) fn create_minecart(
     item_stack: &ItemStack,
     player: Option<&Player>,
 ) -> Result<SharedEntity, CreateMinecartError> {
-    let cart =
+    // Plain, chest, furnace, TNT, hopper and command-block minecarts all
+    // share the generic AbstractMinecart implementation. Using the generic
+    // entity directly also covers variants whose registered factory is a
+    // structure-only stand-in (currently the chest minecart).
+    let generic_variants = [
+        &vanilla_entities::MINECART,
+        &vanilla_entities::CHEST_MINECART,
+        &vanilla_entities::FURNACE_MINECART,
+        &vanilla_entities::TNT_MINECART,
+        &vanilla_entities::HOPPER_MINECART,
+        &vanilla_entities::COMMAND_BLOCK_MINECART,
+    ];
+    let cart: SharedEntity = if generic_variants.contains(&entity_type) {
+        Arc::new(MinecartEntity::new(
+            entity_type,
+            next_entity_id(),
+            position,
+            Arc::downgrade(world),
+        ))
+    } else {
         create_entity_instance(world, entity_type, position).map_err(|error| match error {
             EntitySpawnError::MissingFactory => CreateMinecartError::Unsupported,
             error => CreateMinecartError::Spawn(error),
-        })?;
+        })?
+    };
 
     if cart.as_abstract_minecart().is_none() {
         return Err(CreateMinecartError::Unsupported);

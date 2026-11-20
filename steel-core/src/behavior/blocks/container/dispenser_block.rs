@@ -15,6 +15,7 @@ use std::sync::{Arc, Weak};
 use glam::DVec3;
 use steel_macros::block_behavior;
 use steel_registry::blocks::BlockRef;
+use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{
     BlockStateProperties, BoolProperty, Direction, EnumProperty,
@@ -23,15 +24,18 @@ use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_block_entity_types;
 use steel_registry::{vanilla_blocks, vanilla_entities, vanilla_items};
 use steel_utils::{
-    BlockPos, BlockStateId, Downcast as _, random::Random as _, types::UpdateFlags,
+    BlockPos, BlockStateId, Downcast as _, random::Random as _, translations, types::UpdateFlags,
 };
+use text_components::TextComponent;
 
-use crate::behavior::BlockPlaceContext;
 use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
+use crate::behavior::{BlockHitResult, InteractionResult, InventoryAccess};
+use crate::behavior::BlockPlaceContext;
+use crate::inventory::menu::kinds::generic_9x_menu;
+use crate::player::Player;
 use crate::block_entity::{BLOCK_ENTITIES, BlockEntity as _, entities::DispenserBlockEntity};
 use crate::entity::entities::{
-    ArrowEntity, ChestMinecartEntity, ItemEntity, MinecartEntity, PrimedTntEntity, SnowballEntity,
-    ThrownEggEntity,
+    ArrowEntity, ItemEntity, MinecartEntity, PrimedTntEntity, SnowballEntity, ThrownEggEntity,
 };
 use crate::entity::{Entity, SharedEntity, next_entity_id};
 use crate::inventory::container::{Container, calculate_redstone_signal_from_containers};
@@ -59,6 +63,30 @@ fn placement_state(block: BlockRef, context: &BlockPlaceContext<'_>) -> BlockSta
         .default_state()
         .set_value(FACING, context.get_nearest_looking_direction().opposite())
         .set_value(TRIGGERED, false)
+}
+
+
+/// Opens the 3x3 dispenser/dropper inventory with the player inventory below.
+fn open_three_by_three(
+    world: &Arc<World>,
+    pos: BlockPos,
+    player: &Player,
+    title: TextComponent,
+) -> InteractionResult {
+    let Some(block_entity) = world.get_block_entity(pos) else {
+        return InteractionResult::Pass;
+    };
+    let Some(dispenser) = block_entity.downcast_ref::<DispenserBlockEntity>() else {
+        return InteractionResult::Pass;
+    };
+    let Some(container) = dispenser.container_ref() else {
+        return InteractionResult::Pass;
+    };
+    let inventory = Arc::clone(&player.inventory);
+    player.open_menu(title, move |context| {
+        generic_9x_menu(inventory, context.container_id, container, 3)
+    });
+    InteractionResult::Success
 }
 
 fn analog_output(world: &World, pos: BlockPos) -> i32 {
@@ -98,7 +126,7 @@ fn eject_item(world: &Arc<World>, pos: BlockPos, facing: Direction, stack: ItemS
 
 #[derive(Clone, Copy)]
 enum SpecialDispense {
-    Minecart(bool),
+    Minecart(EntityTypeRef),
     Sapling,
 }
 
@@ -185,9 +213,17 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
 
     if !dropper {
         let special = if stack.item == &*vanilla_items::MINECART {
-            Some(SpecialDispense::Minecart(false))
+            Some(SpecialDispense::Minecart(&vanilla_entities::MINECART))
         } else if stack.item == &*vanilla_items::CHEST_MINECART {
-            Some(SpecialDispense::Minecart(true))
+            Some(SpecialDispense::Minecart(&vanilla_entities::CHEST_MINECART))
+        } else if stack.item == &*vanilla_items::FURNACE_MINECART {
+            Some(SpecialDispense::Minecart(&vanilla_entities::FURNACE_MINECART))
+        } else if stack.item == &*vanilla_items::TNT_MINECART {
+            Some(SpecialDispense::Minecart(&vanilla_entities::TNT_MINECART))
+        } else if stack.item == &*vanilla_items::HOPPER_MINECART {
+            Some(SpecialDispense::Minecart(&vanilla_entities::HOPPER_MINECART))
+        } else if stack.item == &*vanilla_items::COMMAND_BLOCK_MINECART {
+            Some(SpecialDispense::Minecart(&vanilla_entities::COMMAND_BLOCK_MINECART))
         } else if sapling_state(stack.item).is_some() {
             Some(SpecialDispense::Sapling)
         } else {
@@ -216,23 +252,13 @@ fn dispense(state: BlockStateId, world: &Arc<World>, pos: BlockPos, dropper: boo
                         false
                     }
                 }
-                SpecialDispense::Minecart(chest) => {
-                    let entity: SharedEntity = if chest {
-                        let cart = ChestMinecartEntity::new(
-                            &vanilla_entities::CHEST_MINECART,
-                            next_entity_id(),
-                            front.get_center(),
-                            Arc::downgrade(world),
-                        );
-                        Arc::new(cart)
-                    } else {
-                        Arc::new(MinecartEntity::new(
-                            &vanilla_entities::MINECART,
-                            next_entity_id(),
-                            front.get_center(),
-                            Arc::downgrade(world),
-                        ))
-                    };
+                SpecialDispense::Minecart(entity_type) => {
+                    let entity: SharedEntity = Arc::new(MinecartEntity::new(
+                        entity_type,
+                        next_entity_id(),
+                        front.get_center(),
+                        Arc::downgrade(world),
+                    ));
                     world.try_add_entity(entity).is_ok()
                 }
             };
@@ -303,6 +329,23 @@ macro_rules! impl_dispenser_block {
                 context: &BlockPlaceContext<'_>,
             ) -> Option<BlockStateId> {
                 Some(placement_state(self.block, context))
+            }
+
+            fn use_without_item(
+                &self,
+                _state: BlockStateId,
+                world: &Arc<World>,
+                pos: BlockPos,
+                player: &Player,
+                _hit_result: &BlockHitResult,
+                _inv: &mut InventoryAccess,
+            ) -> InteractionResult {
+                open_three_by_three(
+                    world,
+                    pos,
+                    player,
+                    translations::CONTAINER_DISPENSER.msg().component(),
+                )
             }
 
             fn handle_neighbor_changed(

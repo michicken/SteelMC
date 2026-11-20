@@ -4,6 +4,7 @@ mod armadillo;
 mod chested_horse;
 mod chicken;
 mod cow;
+mod goat;
 mod iron_golem;
 mod mooshroom;
 mod pig;
@@ -17,6 +18,7 @@ pub use chested_horse::{
 };
 pub use chicken::ChickenEntity;
 pub use cow::CowEntity;
+pub use goat::GoatEntity;
 pub use iron_golem::IronGolemEntity;
 pub use mooshroom::MushroomCowEntity;
 pub use pig::PigEntity;

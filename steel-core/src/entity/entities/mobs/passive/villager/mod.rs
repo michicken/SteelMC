@@ -152,6 +152,12 @@ impl VillagerEntity {
         self.entity_data.lock().villager_data.get().level
     }
 
+    /// Returns the villager's cumulative trade XP.
+    #[must_use]
+    pub fn trade_xp(&self) -> i32 {
+        *self.trade_xp.lock()
+    }
+
     /// Returns the claimed workstation position.
     #[must_use]
     pub fn claimed_job_site(&self) -> Option<BlockPos> {

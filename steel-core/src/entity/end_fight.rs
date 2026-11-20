@@ -11,9 +11,12 @@ use std::sync::Arc;
 
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
+use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+use steel_registry::blocks::properties::BlockStateProperties;
 use steel_registry::{vanilla_blocks, vanilla_entities};
+use steel_utils::random::{Random as _, legacy_random::LegacyRandom};
 use steel_utils::types::UpdateFlags;
-use steel_utils::{BlockPos, Downcast as _, geometry::WorldAabb, locks::SyncMutex};
+use steel_utils::{BlockPos, ChunkPos, Direction, Downcast as _, geometry::WorldAabb, locks::SyncMutex};
 use uuid::Uuid;
 
 use crate::chunk::heightmap::HeightmapType;
@@ -38,6 +41,16 @@ pub struct EndFightState {
     last_boss_progress: f32,
     /// Transient marker: the state changed since it was last persisted.
     dirty: bool,
+    /// The pre-generated podium is furniture, not a kill reward. Vanilla lays it
+    /// down during worldgen; Steel lays it down once the four chunks around
+    /// (0,0) are fully loaded, then only flips the portal blocks on kill.
+    podium_placed: bool,
+    /// Y level chosen for the podium, kept so activation reuses the exact same
+    /// layer even after the bedrock pillar changes the heightmap.
+    podium_y: Option<i32>,
+    /// Delayed gateways that could not be built because their chunk was not
+    /// loaded yet. Vanilla's `END_GATEWAY_DELAYED` state waits the same way.
+    pending_gateways: Vec<BlockPos>,
 }
 
 /// TOML-serializable half of the fight state. The live entity id is not saved: it
@@ -94,6 +107,15 @@ impl EndFightState {
         if !self.initialized {
             self.initialized = true;
         }
+
+        // Vanilla generates the podium during worldgen. Do the same as soon as
+        // the chunks touching (0,0) are block-ticking, so the bedrock fountain
+        // is already visible before the fight and killing the dragon only
+        // activates its portal blocks.
+        if !self.podium_placed && end_podium_chunks_loaded(world) {
+            self.ensure_end_podium(world);
+        }
+        self.flush_pending_gateways(world);
 
         if self.killed {
             // A leftover dragon (for example one that survived a restart) must not
@@ -230,57 +252,238 @@ impl EndFightState {
         }
     }
 
-    fn build_exit_portal(&self, world: &Arc<World>) {
+    fn ensure_end_podium(&mut self, world: &Arc<World>) {
         let podium = end_podium_location(BlockPos::ZERO);
-        let y = world
-            .height_at(HeightmapType::MotionBlocking, podium.x(), podium.z())
-            .filter(|y| *y > world.get_min_y())
+        let y = self.podium_y.unwrap_or_else(|| {
+            world
+                .height_at(HeightmapType::MotionBlocking, podium.x(), podium.z())
+                .filter(|y| *y > world.get_min_y())
+                .unwrap_or(65)
+        });
+        self.podium_y = Some(y);
+
+        // Worlds won before this fix stored the egg one block above the portal.
+        // Preserve it: remember where it is before the bedrock pillar is rebuilt,
+        // then move it to the Vanilla pillar top (four blocks above the portal).
+        let old_egg = if self.killed {
+            find_dragon_egg(world, podium, y)
+        } else {
+            None
+        };
+
+        place_end_podium_live(world, BlockPos::new(podium.x(), y, podium.z()), self.killed);
+        self.podium_placed = true;
+        self.dirty = true;
+
+        // The first Steel implementation dropped four gateways in a plus-shape
+        // six blocks from the podium. Remove that exact legacy layout once, so
+        // worlds won before this fix do not keep the wrong geometry.
+        if self.killed {
+            remove_legacy_end_gateways(world, podium, y);
+        }
+
+        if let Some(old_egg) = old_egg {
+            let target = BlockPos::new(podium.x(), y + 4, podium.z());
+            if old_egg != target {
+                let _ = world.set_block(
+                    old_egg,
+                    vanilla_blocks::AIR.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+                let _ = world.set_block(
+                    target,
+                    vanilla_blocks::DRAGON_EGG.default_state(),
+                    UpdateFlags::UPDATE_ALL,
+                );
+            }
+        }
+    }
+
+    fn flush_pending_gateways(&mut self, world: &Arc<World>) {
+        let mut index = 0;
+        while index < self.pending_gateways.len() {
+            let pos = self.pending_gateways[index];
+            if world.create_end_gateway_portal(pos, None, false) {
+                self.pending_gateways.remove(index);
+                self.dirty = true;
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn build_exit_portal(&mut self, world: &Arc<World>) {
+        let podium = end_podium_location(BlockPos::ZERO);
+        let y = self
+            .podium_y
+            .or_else(|| {
+                world
+                    .height_at(HeightmapType::MotionBlocking, podium.x(), podium.z())
+                    .filter(|y| *y > world.get_min_y())
+            })
             .unwrap_or(65);
+        self.podium_y = Some(y);
+        self.podium_placed = true;
 
-        let bedrock = vanilla_blocks::BEDROCK.default_state();
-        let portal = vanilla_blocks::END_PORTAL.default_state();
-
-        for dx in -2..=2 {
-            for dz in -2..=2 {
-                world.set_block(
-                    BlockPos::new(podium.x() + dx, y - 1, podium.z() + dz),
-                    bedrock,
-                    UpdateFlags::UPDATE_ALL,
-                );
-            }
-        }
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                world.set_block(
-                    BlockPos::new(podium.x() + dx, y, podium.z() + dz),
-                    portal,
-                    UpdateFlags::UPDATE_ALL,
-                );
-            }
-        }
-        // The egg is the visible trophy; it sits on the portal's centre.
+        // The podium itself already exists. Activating only replaces the inner
+        // rim with End portal blocks, exactly like Vanilla's active feature.
+        place_end_podium_live(world, BlockPos::new(podium.x(), y, podium.z()), true);
+        // The egg sits on top of the four-block bedrock pillar.
         world.set_block(
-            BlockPos::new(podium.x(), y + 1, podium.z()),
+            BlockPos::new(podium.x(), y + 4, podium.z()),
             vanilla_blocks::DRAGON_EGG.default_state(),
             UpdateFlags::UPDATE_ALL,
         );
 
-        self.spawn_end_gateways(world, podium, y);
+        self.spawn_delayed_gateway(world);
     }
 
-    /// Places End gateway blocks around the exit portal after the dragon dies.
-    ///
-    /// The gateways are created with an unassigned exit (`exit = None`,
-    /// `exact = false`), matching the vanilla delayed gateway state. The first
-    /// use runs the existing outer-island XZ search; any island shape randomness
-    /// there is seeded from the target block position, never a local RNG.
-    fn spawn_end_gateways(&self, world: &Arc<World>, podium: BlockPos, y: i32) {
-        let offsets: [(i32, i32); 4] = [(6, 0), (-6, 0), (0, 6), (0, -6)];
-        for (dx, dz) in offsets {
-            let origin = BlockPos::new(podium.x() + dx, y, podium.z() + dz);
-            let _ = world.create_end_gateway_portal(origin, None, false);
+    /// One gateway per won fight, at one of Vanilla's twenty fixed spots on the
+    /// 96-block ring around the island (Y=75), picked by world seed.
+    fn spawn_delayed_gateway(&mut self, world: &Arc<World>) {
+        let mut random = LegacyRandom::from_seed(world.seed() as u64);
+        let index = random.next_i32_bounded(END_GATEWAY_SLOTS);
+        let pos = end_gateway_position(index);
+        if !world.create_end_gateway_portal(pos, None, false) {
+            self.pending_gateways.push(pos);
+        }
+        self.dirty = true;
+    }
+}
+
+const END_GATEWAY_SLOTS: i32 = 20;
+const END_GATEWAY_RING_RADIUS: f64 = 96.0;
+const END_GATEWAY_Y: i32 = 75;
+
+fn end_podium_closer_than(pos: BlockPos, origin: BlockPos, distance: f64) -> bool {
+    let dx = f64::from(pos.x() - origin.x());
+    let dy = f64::from(pos.y() - origin.y());
+    let dz = f64::from(pos.z() - origin.z());
+    dx * dx + dy * dy + dz * dz < distance * distance
+}
+
+/// Live-world counterpart of Vanilla's `EndPodiumFeature.place`.
+fn place_end_podium_live(world: &Arc<World>, origin: BlockPos, active: bool) {
+    let bedrock = vanilla_blocks::BEDROCK.default_state();
+    let end_stone = vanilla_blocks::END_STONE.default_state();
+    let air = vanilla_blocks::AIR.default_state();
+    let end_portal = vanilla_blocks::END_PORTAL.default_state();
+
+    for pos in BlockPos::between_closed(origin.offset(-4, -1, -4), origin.offset(4, 32, 4)) {
+        let inside_rim = end_podium_closer_than(pos, origin, 2.5);
+        if !inside_rim && !end_podium_closer_than(pos, origin, 3.5) {
+            continue;
+        }
+
+        let state = if pos.y() < origin.y() {
+            if inside_rim { bedrock } else { end_stone }
+        } else if pos.y() > origin.y() {
+            air
+        } else if !inside_rim {
+            bedrock
+        } else if active {
+            end_portal
+        } else {
+            air
+        };
+        set_podium_block(world, pos, state);
+    }
+
+    // Four-block bedrock pillar in the centre, with one torch on each side.
+    for dy in 0..4 {
+        set_podium_block(world, origin.above_n(dy), bedrock);
+    }
+    let center = origin.above_n(2);
+    for facing in [
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ] {
+        let torch = vanilla_blocks::WALL_TORCH
+            .default_state()
+            .set_value(&BlockStateProperties::HORIZONTAL_FACING, facing);
+        set_podium_block(world, center.relative(facing), torch);
+    }
+}
+
+fn set_podium_block(world: &Arc<World>, pos: BlockPos, state: steel_utils::BlockStateId) {
+    // `set_block` reports an unchanged position as failure; the podium is
+    // idempotent, so every result is intentionally ignored.
+    let _ = world.set_block(pos, state, UpdateFlags::UPDATE_ALL);
+}
+
+/// The 9x9 podium footprint touches chunks (-1,-1) through (0,0).
+fn end_podium_chunks_loaded(world: &Arc<World>) -> bool {
+    [
+        ChunkPos::new(-1, -1),
+        ChunkPos::new(-1, 0),
+        ChunkPos::new(0, -1),
+        ChunkPos::new(0, 0),
+    ]
+    .into_iter()
+    .all(|pos| world.chunk_map.is_block_ticking_full_chunk_loaded(pos))
+}
+
+fn remove_legacy_end_gateways(world: &Arc<World>, podium: BlockPos, y: i32) {
+    let centers = [(6, 0), (-6, 0), (0, 6), (0, -6)];
+    let all_legacy = centers.iter().all(|(dx, dz)| {
+        world.get_block_state(BlockPos::new(podium.x() + *dx, y, podium.z() + *dz)).get_block()
+            == &vanilla_blocks::END_GATEWAY
+    });
+    if !all_legacy {
+        return;
+    }
+
+    // `create_end_gateway_portal` builds a 3x3x5 bedrock cage around each
+    // gateway. Remove exactly that pattern while leaving mismatched blocks
+    // alone, so a player-modified structure is not damaged further.
+    for (cx, cz) in centers {
+        let origin = BlockPos::new(podium.x() + cx, y, podium.z() + cz);
+        for dy in -2_i32..=2 {
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let center = dx == 0 && dy == 0 && dz == 0;
+                    let end = dy.abs() == 2;
+                    let frame = (end && dx == 0 && dz == 0)
+                        || ((dx == 0 || dz == 0) && !end);
+                    if !center && !frame {
+                        continue;
+                    }
+                    let expected = if center {
+                        &vanilla_blocks::END_GATEWAY
+                    } else {
+                        &vanilla_blocks::BEDROCK
+                    };
+                    let pos = origin.offset(dx, dy, dz);
+                    if world.get_block_state(pos).get_block() == expected {
+                        let _ = world.set_block(
+                            pos,
+                            vanilla_blocks::AIR.default_state(),
+                            UpdateFlags::UPDATE_ALL,
+                        );
+                    }
+                }
+            }
         }
     }
+}
+
+fn find_dragon_egg(world: &Arc<World>, podium: BlockPos, y: i32) -> Option<BlockPos> {
+    (0..=5)
+        .map(|dy| BlockPos::new(podium.x(), y + dy, podium.z()))
+        .find(|pos| world.get_block_state(*pos).get_block() == &vanilla_blocks::DRAGON_EGG)
+}
+
+/// Vanilla `EndDragonFight` ring: `floor(96 * cos(PI*i/10))`,
+/// `floor(96 * sin(PI*i/10))`, always at Y=75.
+fn end_gateway_position(index: i32) -> BlockPos {
+    let angle = std::f64::consts::PI * f64::from(index) / 10.0;
+    BlockPos::new(
+        (END_GATEWAY_RING_RADIUS * angle.cos()).floor() as i32,
+        END_GATEWAY_Y,
+        (END_GATEWAY_RING_RADIUS * angle.sin()).floor() as i32,
+    )
 }
 
 /// Shared End fight slot stored on every world, used only in the End.
@@ -302,7 +505,7 @@ mod tests {
     use crate::entity::entities::mobs::bosses::ender_dragon::EnderDragonPhase;
     use crate::entity::{Entity, LivingEntity, reserve_entity_ids};
 
-    use super::{EndFightState, PersistedEndFight};
+    use super::{END_GATEWAY_Y, EndFightState, PersistedEndFight};
     use crate::test_support::{fresh_test_world_with_dimension_type, insert_ready_full_chunk};
 
     fn end_world(key: &'static str) -> Arc<crate::world::World> {
@@ -450,21 +653,25 @@ mod tests {
         assert!(world.is_ender_dragon_killed());
 
         let podium = crate::entity::entities::mobs::bosses::ender_dragon::end_podium_location(BlockPos::ZERO);
+        // The podium keeps a bedrock pillar on the centre column, so the portal
+        // ring sits one block east of the centre.
         let portal = (60..80)
             .find(|y| {
                 world
-                    .get_block_state(BlockPos::new(podium.x(), *y, podium.z()))
+                    .get_block_state(BlockPos::new(podium.x() + 1, *y, podium.z()))
                     .get_block()
                     == vanilla_blocks::END_PORTAL.default_state().get_block()
             })
             .expect("return portal should exist at the podium");
         assert_eq!(
-            world.get_block_state(BlockPos::new(podium.x(), portal + 1, podium.z())).get_block(),
+            world.get_block_state(BlockPos::new(podium.x(), portal + 4, podium.z())).get_block(),
             vanilla_blocks::DRAGON_EGG.default_state().get_block()
         );
+        // The rim is bedrock at the portal layer; the old 5x5 bedrock base
+        // below the portal was the placeholder this fix removes.
         assert_eq!(
             world
-                .get_block_state(BlockPos::new(podium.x() + 2, portal - 1, podium.z() + 2))
+                .get_block_state(BlockPos::new(podium.x() + 2, portal, podium.z() + 2))
                 .get_block(),
             vanilla_blocks::BEDROCK.default_state().get_block()
         );
@@ -477,51 +684,68 @@ mod tests {
     }
 
     #[test]
-    fn killing_the_dragon_spawns_gateways_with_unassigned_exits() {
+    fn killing_the_dragon_spawns_one_gateway_on_the_outer_ring() {
         let world = end_world("gateways");
         let mut fight = EndFightState::default();
         fight.tick(&world);
         assert!(!fight.is_killed());
+        // The inactive podium already exists before the kill; only its portal
+        // blocks are a kill reward.
+        assert!(fight.podium_placed);
 
         world.on_ender_dragon_killed();
         assert!(world.is_ender_dragon_killed());
 
-        let podium = crate::entity::entities::mobs::bosses::ender_dragon::end_podium_location(BlockPos::ZERO);
-        let portal_y = (60..80)
-            .find(|y| {
-                world
-                    .get_block_state(BlockPos::new(podium.x(), *y, podium.z()))
-                    .get_block()
-                    == vanilla_blocks::END_PORTAL.default_state().get_block()
-            })
-            .expect("return portal should exist at the podium");
+        // Vanilla opens one gateway per dragon kill, on the 96-block ring at
+        // Y=75, picked by world seed. The world's own fight state owns the
+        // delayed queue, not the local shadow used above.
+        let mut random = steel_utils::random::legacy_random::LegacyRandom::from_seed(
+            world.seed() as u64,
+        );
+        let index = steel_utils::random::Random::next_i32_bounded(
+            &mut random,
+            super::END_GATEWAY_SLOTS,
+        );
+        let gateway_pos = super::end_gateway_position(index);
+        assert_eq!(gateway_pos.y(), END_GATEWAY_Y);
+        let distance = f64::from(gateway_pos.x()).hypot(f64::from(gateway_pos.z()));
+        assert!(distance > 90.0, "gateway must sit on the outer ring, got {gateway_pos:?}");
 
-        let offsets: [(i32, i32); 4] = [(6, 0), (-6, 0), (0, 6), (0, -6)];
-        let mut gateways_found = 0;
-        for (dx, dz) in offsets {
-            let pos = BlockPos::new(podium.x() + dx, portal_y, podium.z() + dz);
-            if world.get_block_state(pos).get_block()
-                != vanilla_blocks::END_GATEWAY.default_state().get_block()
-            {
-                continue;
+        let is_delayed = {
+            let state = world.end_fight.lock();
+            assert!(state.pending_gateways.len() <= 1);
+            state.pending_gateways.contains(&gateway_pos)
+        };
+        if is_delayed {
+            // Load the chunks touching the ring position; the delayed gateway
+            // then materializes exactly like `END_GATEWAY_DELAYED`.
+            let chunk = steel_utils::ChunkPos::new(gateway_pos.x() >> 4, gateway_pos.z() >> 4);
+            for cx in (chunk.0.x - 1)..=(chunk.0.x + 1) {
+                for cz in (chunk.0.y - 1)..=(chunk.0.y + 1) {
+                    insert_ready_full_chunk(&world, steel_utils::ChunkPos::new(cx, cz));
+                }
             }
-            let block_entity = world
-                .get_block_entity(pos)
-                .expect("delayed gateway must have a block entity");
-            let gateway = block_entity
-                .downcast_ref::<crate::block_entity::entities::EndGatewayBlockEntity>()
-                .expect("block entity should be an end gateway");
-            assert_eq!(
-                gateway.exit_portal(),
-                None,
-                "post-kill gateway exit must be unassigned, not a placeholder coordinate"
-            );
-            assert!(!gateway.exact_teleport());
-            // A freshly created gateway is still in its spawning phase (`Age = 0`).
-            assert!(gateway.is_spawning());
-            gateways_found += 1;
+            world.end_fight.lock().tick(&world);
+            assert!(world.end_fight.lock().pending_gateways.is_empty());
         }
-        assert!(gateways_found >= 1, "at least one delayed gateway must be built");
+
+        assert_eq!(
+            world.get_block_state(gateway_pos).get_block(),
+            vanilla_blocks::END_GATEWAY.default_state().get_block()
+        );
+        let block_entity = world
+            .get_block_entity(gateway_pos)
+            .expect("delayed gateway must have a block entity");
+        let gateway = block_entity
+            .downcast_ref::<crate::block_entity::entities::EndGatewayBlockEntity>()
+            .expect("block entity should be an end gateway");
+        assert_eq!(
+            gateway.exit_portal(),
+            None,
+            "post-kill gateway exit must be unassigned, not a placeholder coordinate"
+        );
+        assert!(!gateway.exact_teleport());
+        assert!(gateway.is_spawning());
     }
 
     #[test]
@@ -584,14 +808,14 @@ mod tests {
         let portal = (60..80)
             .find(|y| {
                 world
-                    .get_block_state(BlockPos::new(podium.x(), *y, podium.z()))
+                    .get_block_state(BlockPos::new(podium.x() + 1, *y, podium.z()))
                     .get_block()
                     == vanilla_blocks::END_PORTAL.default_state().get_block()
             })
             .expect("real dragon death must build the return portal");
         assert!(
             world
-                .get_block_state(BlockPos::new(podium.x(), portal + 1, podium.z()))
+                .get_block_state(BlockPos::new(podium.x(), portal + 4, podium.z()))
                 .get_block()
                 == vanilla_blocks::DRAGON_EGG.default_state().get_block()
         );

@@ -68,11 +68,10 @@ impl Entity for ArmorStandEntity {
         self.entity_type
     }
 
-    fn tick(self: Arc<Self>) {}
-
-    fn no_physics(&self) -> bool {
-        true
+    fn tick(self: Arc<Self>) {
+        self.default_tick();
     }
+
 
     fn can_add_passenger(&self, _passenger: &dyn Entity) -> bool {
         false

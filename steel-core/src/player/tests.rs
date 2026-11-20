@@ -2208,3 +2208,31 @@ fn grounded_sword_attack_sweeps_nearby_entities_within_three_blocks() {
         vec![sound_events::ENTITY_PLAYER_ATTACK_STRONG.packet_holder_id()]
     );
 }
+
+#[test]
+fn spear_charge_damages_a_target_when_closing_fast_enough() {
+    let fixture = MeleeFixture::new("player_spear_charge");
+    fixture
+        .attacker
+        .inventory
+        .lock()
+        .set_selected_item(ItemStack::new(&vanilla_items::WOODEN_SPEAR));
+    // Aim slightly down so the eye-height ray crosses the pig's box, and move
+    // toward it faster than the wooden spear's 4.6 blocks/second damage gate.
+    fixture.attacker.set_rotation((0.0, 30.0));
+    let pig = fixture.spawn_pig(DVec3::new(0.0, 0.0, 3.0));
+
+    fixture.attacker.start_using_item(InteractionHand::MainHand);
+    let entity: SharedEntity = fixture.attacker.clone();
+    for _ in 0..20 {
+        fixture
+            .attacker
+            .set_velocity(DVec3::new(0.0, 0.0, 0.4));
+        fixture.attacker.tick_active_item_use(&entity);
+    }
+
+    assert!(
+        pig.invulnerable_time() > 0,
+        "a held spear charge must damage a target it closes on"
+    );
+}

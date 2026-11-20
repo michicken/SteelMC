@@ -171,8 +171,6 @@ pub struct ChunkHolder {
     min_y: i32,
     /// The total height of the world.
     height: i32,
-    /// Whether any sections have pending block changes.
-    has_changed_sections: AtomicBool,
     /// Whether this holder is already queued for the next broadcast flush.
     queued_for_broadcast: AtomicBool,
     /// Monotonic revision for client-visible chunk packet content.
@@ -183,9 +181,8 @@ pub struct ChunkHolder {
     full_status_initialized: AtomicBool,
     /// Weak sink for Full status publication notifications.
     full_publications: Weak<FullPublicationQueue>,
-    /// Per-section sets of changed block positions.
-    /// Index is `(block_y - min_y) / 16`.
-    changed_blocks_per_section: Box<[SyncMutex<FxHashSet<PackedSectionBlockPos>>]>,
+    /// Pending block changes, sorted by section. Chunks with no changes allocate nothing.
+    changed_blocks: SyncMutex<Vec<(usize, FxHashSet<PackedSectionBlockPos>)>>,
     /// Changed light sections grouped by light layer.
     changed_light_sections: SyncMutex<ChangedLightSectionSets>,
 }
@@ -295,11 +292,6 @@ impl ChunkHolder {
         let highest_allowed_status =
             generation_status(Some(load_level)).map_or(STATUS_NONE, |s| s.get_index() as u8);
 
-        let section_count = (height / 16) as usize;
-        let changed_blocks_per_section = (0..section_count)
-            .map(|_| SyncMutex::new(FxHashSet::default()))
-            .collect::<Box<[_]>>();
-
         Self {
             data: OnceLock::new(),
             published_status: AtomicU8::new(UNPUBLISHED_STATUS),
@@ -315,13 +307,12 @@ impl ChunkHolder {
             highest_allowed_status: AtomicU8::new(highest_allowed_status),
             min_y,
             height,
-            has_changed_sections: AtomicBool::new(false),
             queued_for_broadcast: AtomicBool::new(false),
             packet_content_revision: AtomicU64::new(0),
             ticking_readiness: AtomicU64::new(0),
             full_status_initialized: AtomicBool::new(false),
             full_publications,
-            changed_blocks_per_section,
+            changed_blocks: SyncMutex::new(Vec::new()),
             changed_light_sections: SyncMutex::new(ChangedLightSectionSets::default()),
         }
     }
@@ -389,16 +380,25 @@ impl ChunkHolder {
         }
 
         let section_index = ((pos.0.y - self.min_y) / 16) as usize;
-        if section_index >= self.changed_blocks_per_section.len() {
+        if section_index >= self.section_count() {
             return false;
         }
 
         let packed = SectionPos::section_relative_pos(pos);
-        self.changed_blocks_per_section[section_index]
-            .lock()
-            .insert(packed);
-        self.mark_packet_content_changed();
-        self.has_changed_sections.store(true, Ordering::Release);
+        {
+            let mut changed_blocks = self.changed_blocks.lock();
+            match changed_blocks.binary_search_by_key(&section_index, |(index, _)| *index) {
+                Ok(index) => {
+                    changed_blocks[index].1.insert(packed);
+                }
+                Err(index) => {
+                    let mut positions = FxHashSet::default();
+                    positions.insert(packed);
+                    changed_blocks.insert(index, (section_index, positions));
+                }
+            }
+            self.mark_packet_content_changed();
+        }
 
         !self.queued_for_broadcast.swap(true, Ordering::AcqRel)
     }
@@ -464,18 +464,7 @@ impl ChunkHolder {
     /// Takes all pending block changes, grouped by section index.
     /// Returns a vec of (`section_index`, set of packed positions).
     pub fn take_changed_blocks(&self) -> Vec<(usize, FxHashSet<PackedSectionBlockPos>)> {
-        if !self.has_changed_sections.swap(false, Ordering::AcqRel) {
-            return Vec::new();
-        }
-
-        let mut result = Vec::new();
-        for (section_index, section_changes) in self.changed_blocks_per_section.iter().enumerate() {
-            let mut guard = section_changes.lock();
-            if !guard.is_empty() {
-                result.push((section_index, mem::take(&mut *guard)));
-            }
-        }
-        result
+        mem::take(&mut *self.changed_blocks.lock())
     }
 
     /// Takes all pending light-section changes.
@@ -540,7 +529,7 @@ impl ChunkHolder {
 
     /// Returns the number of sections in this chunk.
     pub fn section_count(&self) -> usize {
-        self.changed_blocks_per_section.len()
+        (self.height / 16) as usize
     }
 
     /// Checks if the given status is disallowed.

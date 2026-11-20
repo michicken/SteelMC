@@ -171,6 +171,9 @@ impl Player {
                 }
                 if let Some(piercing_weapon) = main_hand_item.get_piercing_weapon() {
                     self.piercing_attack(&main_hand_item, piercing_weapon);
+                } else if let Some(kinetic_weapon) = main_hand_item.get_kinetic_weapon() {
+                    // Spears report their jab through STAB instead of INTERACT/ATTACK.
+                    self.kinetic_attack(&main_hand_item, kinetic_weapon);
                 }
             }
         }

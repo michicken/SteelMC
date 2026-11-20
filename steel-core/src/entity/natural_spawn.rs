@@ -30,10 +30,11 @@ const HOSTILE_CAP: usize = 24;
 const PASSIVE_CAP: usize = 10;
 /// Nether brick search radius for fortress-only spawns.
 const FORTRESS_SEARCH_RADIUS: i32 = 16;
-/// Minimum horizontal distance from a player; the vanilla ring is wider (24–44),
-/// but the current candidate box is only ±16 around the player, so this lower
-/// bound keeps mobs off the player's same block and face-to-face position.
-const MIN_SPAWN_DISTANCE_SQR: f64 = 5.0 * 5.0;
+/// Vanilla's hostile spawn ring is 24–128 blocks horizontally. Sampling the
+/// full 128-block ring is too expensive for Steel's point sampler, so use a
+/// 24–48 block ring inside the candidate box.
+const MIN_SPAWN_DISTANCE: f64 = 24.0;
+const MAX_SPAWN_DISTANCE: f64 = 48.0;
 
 /// Tries to spawn naturally near every player. Returns the number spawned.
 pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> usize {
@@ -43,9 +44,12 @@ pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> us
         false
     });
     let mut spawned = 0;
-    // Seed the spawn rolls from the world seed so the same world reproduces the
-    // same spawn sequence instead of relying on the process-wide `rand` pool.
-    let mut random = RandomSource::Legacy(LegacyRandom::from_seed(world.seed() as u64));
+    // Include game time in the seed. Previously every tick re-created the
+    // same RNG stream from `world.seed()`, so every attempt landed on exactly
+    // the same block and mobs visibly stacked on one another.
+    let mut random = RandomSource::Legacy(LegacyRandom::from_seed(
+        (world.seed() as u64) ^ (world.game_time() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    ));
     for (player_pos, _) in players {
         let hostiles = world
             .get_entities_in_aabb_matching(
@@ -65,15 +69,21 @@ pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> us
         }
 
         for _ in 0..attempts_per_player {
-            let x = player_pos.x + (random.next_f64() - 0.5) * 32.0;
-            let z = player_pos.z + (random.next_f64() - 0.5) * 32.0;
-            let y = player_pos.y + (random.next_f64() - 0.5) * 16.0;
+            let x = player_pos.x + (random.next_f64() - 0.5) * 96.0;
+            let z = player_pos.z + (random.next_f64() - 0.5) * 96.0;
+            // Vanilla samples the whole loaded column, not a narrow band around
+            // the player's feet. Sampling only `player.y ± 24` made caves and
+            // deep terrain unreachable for the spawner.
+            let y = random.next_i32_between(world.get_min_y() + 1, world.get_max_y() - 1);
             let dx = x - player_pos.x;
             let dz = z - player_pos.z;
-            if dx * dx + dz * dz < MIN_SPAWN_DISTANCE_SQR {
+            let distance_sqr = dx * dx + dz * dz;
+            if !(MIN_SPAWN_DISTANCE * MIN_SPAWN_DISTANCE..=MAX_SPAWN_DISTANCE * MAX_SPAWN_DISTANCE)
+                .contains(&distance_sqr)
+            {
                 continue;
             }
-            let pos = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
+            let pos = BlockPos::new(x.floor() as i32, y, z.floor() as i32);
             if !is_dark_spawnable(world, pos) {
                 continue;
             }
@@ -128,22 +138,15 @@ fn spawn_hostile_for_dimension(
                 ))
             };
         }
-        // Non-fortress Nether: ghasts and wither skeletons only. Zombies are an
-        // Overworld mob and must not spawn on Nether surface.
-        return match random.next_i32_bounded(3) {
-            0 => Arc::new(GhastEntity::new(
-                &vanilla_entities::GHAST,
-                next_entity_id(),
-                pos.get_center(),
-                Arc::downgrade(world),
-            )),
-            _ => Arc::new(WitherSkeletonEntity::new(
-                &vanilla_entities::WITHER_SKELETON,
-                next_entity_id(),
-                pos.get_center(),
-                Arc::downgrade(world),
-            )),
-        };
+        // Non-fortress Nether must not spawn fortress-only mobs. Wither
+        // skeletons previously filled this branch and appeared across open
+        // nether terrain; until piglins/hoglins exist, only ghasts spawn here.
+        return Arc::new(GhastEntity::new(
+            &vanilla_entities::GHAST,
+            next_entity_id(),
+            pos.get_center(),
+            Arc::downgrade(world),
+        ));
     }
 
     match random.next_i32_bounded(10) {
@@ -213,7 +216,10 @@ fn is_dark_spawnable(world: &Arc<World>, pos: BlockPos) -> bool {
     if world.light_value_at(LightLayer::Block, pos) > 0 {
         return false;
     }
-    let sky = world.light_value_at(LightLayer::Sky, pos);
+    // Vanilla compares `getMaxLocalRawBrightness`, which subtracts the
+    // current sky darkening from sky light. Using raw sky light made every
+    // exposed surface block reject spawning forever, including at midnight.
+    let sky = world.effective_sky_brightness(pos);
     // Headless test worlds do not run the sky-light propagation pass when
     // blocks are placed, so a built dark room still reports sky light 15.
     // Treat a solid roof within 16 blocks as equivalent dark cover; the roof

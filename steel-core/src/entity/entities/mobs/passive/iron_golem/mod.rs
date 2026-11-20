@@ -14,6 +14,7 @@ use steel_registry::vanilla_entity_data::IronGolemEntityData;
 use steel_registry::{sound_events, vanilla_attributes, vanilla_items};
 use steel_utils::locks::SyncMutex;
 use steel_utils::nbt::NbtValueInput as _;
+use steel_utils::entity_events::EntityStatus;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
 
 use crate::entity::ai::goal::{
@@ -262,6 +263,18 @@ impl Mob for IronGolemEntity {
 
     fn set_mob_flags(&self, flags: i8) {
         self.entity_data.lock().mob_mut().mob_flags.set(flags);
+    }
+
+    /// Vanilla `IronGolem.doHurtTarget` sets the 10-tick attack animation and
+    /// broadcasts entity event 4. The client golem model does not animate its
+    /// arms from `CSwingAnimation` alone, so without this event an attack deals
+    /// damage but looks static.
+    fn do_hurt_target(&self, entity: &SharedEntity, world: &World, target: &SharedEntity) -> bool {
+        let hurt = crate::entity::mob::do_hurt_target_default(self, entity, world, target);
+        if hurt {
+            self.broadcast_entity_event(EntityStatus::StartAttacking);
+        }
+        hurt
     }
 }
 

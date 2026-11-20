@@ -5,6 +5,7 @@ mod clear;
 mod damage;
 mod defaultgamemode;
 mod difficulty;
+mod effect;
 mod domain;
 mod enchant;
 mod execute;
@@ -81,6 +82,7 @@ pub(crate) fn create_registered_dispatcher(
     builder.register(damage::registration())?;
     builder.register(defaultgamemode::registration())?;
     builder.register(difficulty::registration())?;
+    builder.register(effect::registration())?;
     builder.register(domain::registration())?;
     builder.register(enchant::registration())?;
     builder.register(execute::registration())?;

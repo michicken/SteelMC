@@ -11,6 +11,7 @@ use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::WitherSkeletonEntityData;
 use steel_registry::item_stack::ItemStack;
+use crate::inventory::equipment::EquipmentSlot;
 use steel_registry::{sound_events, vanilla_attributes, vanilla_items};
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey};
@@ -93,6 +94,11 @@ impl WitherSkeletonEntity {
         mob_base.set_xp_reward(XP_REWARD);
         let mut entity_data = WitherSkeletonEntityData::new();
         living_base.initialize_synced_data(&mut entity_data);
+        // Vanilla wither skeletons always spawn with a stone sword.
+        living_base
+            .equipment()
+            .lock()
+            .set(EquipmentSlot::MainHand, ItemStack::new(&vanilla_items::STONE_SWORD));
 
         {
             let mut goal_selector = mob_base.goal_selector().lock();

@@ -16,6 +16,7 @@ use crate::player::food_data::food_constants;
 use std::ops::Add;
 use steel_math::{round_f32, trig};
 use steel_protocol::packets::game::CAnimate;
+use steel_registry::data_components::vanilla_components::KineticWeapon;
 use steel_registry::particle_type::ParticleData;
 use steel_registry::vanilla_entity_type_tags::EntityTypeTag;
 use steel_registry::vanilla_item_tags::ItemTag;
@@ -327,9 +328,6 @@ impl Player {
     fn can_piercing_hit_entity(&self, target: &dyn Entity) -> bool {
         target.id() != self.id()
             && !target.is_invulnerable()
-            && target
-                .as_living_entity()
-                .is_some_and(|living| living.invulnerable_time() > 0)
             && target.is_alive()
             && target.can_be_hit_by_projectile()
             && target
@@ -372,6 +370,137 @@ impl Player {
         );
     }
 
+    /// Performs a spear jab along the view ray. Unlike the held charge this
+    /// ignores closing-speed gates: a stab at normal reach always deals the
+    /// player's attack damage, with knockback/dismount gated by current speed.
+    pub(super) fn kinetic_attack(
+        self: &Arc<Self>,
+        item_stack: &ItemStack,
+        weapon: &KineticWeapon,
+    ) {
+        let world = self.get_world();
+        let look = self.look_angle();
+        let speed = if look.length_squared() <= f64::EPSILON {
+            0.0
+        } else {
+            self.velocity().dot(look) * 20.0
+        };
+        let deals_knockback = weapon
+            .knockback_conditions()
+            .is_some_and(|condition| speed >= f64::from(condition.min_speed()));
+        let dismounts = weapon
+            .dismount_conditions()
+            .is_some_and(|condition| speed >= f64::from(condition.min_speed()));
+        let base_damage = self
+            .attributes()
+            .lock()
+            .required_value(vanilla_attributes::ATTACK_DAMAGE) as f32;
+        let mut hit_something = false;
+        for target in self.piercing_hit_entities(item_stack, &world) {
+            hit_something |= self.stab_attack(
+                &target,
+                base_damage,
+                true,
+                deals_knockback,
+                dismounts,
+            );
+        }
+
+        self.reset_attack_strength_ticker();
+        enchantment_helper::do_post_piercing_attack_effects(&world, self.as_ref());
+        if hit_something {
+            self.play_sound_holder(weapon.hit_sound());
+        }
+        self.swing(
+            InteractionHand::MainHand,
+            self.attack_animation(InteractionHand::MainHand),
+            false,
+        );
+    }
+
+    /// Ticks a held spear-style charge. Vanilla recomputes this every tick while
+    /// the use button is held: targets in the view ray take damage scaled by the
+    /// closing speed projected onto the view vector, with per-tier speed gates.
+    pub(crate) fn tick_kinetic_weapon(
+        &self,
+        attacker: &SharedEntity,
+        item_stack: &ItemStack,
+        weapon: &KineticWeapon,
+        elapsed_ticks: i32,
+    ) {
+        let Some(player) = attacker.as_player() else {
+            return;
+        };
+        let Some(damage_condition) = weapon.damage_conditions() else {
+            return;
+        };
+        if elapsed_ticks < weapon.delay_ticks() {
+            return;
+        }
+        let active_ticks = elapsed_ticks - weapon.delay_ticks();
+        if active_ticks > damage_condition.max_duration_ticks() {
+            return;
+        }
+        // Contact cooldown: one roll per window instead of one per tick.
+        if active_ticks % weapon.contact_cooldown_ticks().max(1) != 0 {
+            return;
+        }
+
+        let look = player.look_angle();
+        if look.length_squared() <= f64::EPSILON {
+            return;
+        }
+        let world = player.get_world();
+        let attack_damage = player
+            .attributes()
+            .lock()
+            .required_value(vanilla_attributes::ATTACK_DAMAGE) as f32;
+        // Velocities are blocks/tick; the component's speed gates are blocks/second.
+        let user_speed = player.velocity().dot(look) * 20.0;
+        let damage_type = item_stack
+            .get_damage_type()
+            .unwrap_or(&vanilla_damage_types::SPEAR);
+        let damage_source = DamageSource::direct(damage_type, SharedEntity::clone(attacker));
+        let mut hit_any = false;
+
+        for target in player.piercing_hit_entities(item_stack, &world) {
+            let closing_speed = user_speed - target.velocity().dot(look) * 20.0;
+            if closing_speed < f64::from(damage_condition.min_relative_speed())
+                || user_speed < f64::from(damage_condition.min_speed())
+            {
+                continue;
+            }
+
+            let damage =
+                ((closing_speed as f32) * weapon.damage_multiplier()).floor() + attack_damage;
+            if damage <= 0.0 || !target.hurt(&world, &damage_source, damage) {
+                continue;
+            }
+            hit_any = true;
+
+            if weapon.knockback_conditions().is_some_and(|condition| {
+                active_ticks <= condition.max_duration_ticks()
+                    && user_speed >= f64::from(condition.min_speed())
+            }) {
+                target.push_impulse(DVec3::new(look.x * 0.5, 0.1, look.z * 0.5));
+            }
+
+            if weapon.dismount_conditions().is_some_and(|condition| {
+                active_ticks <= condition.max_duration_ticks()
+                    && user_speed >= f64::from(condition.min_speed())
+            }) && target.vehicle().is_some()
+            {
+                target.stop_riding();
+            }
+
+            player.attack_visual_effects(target.as_ref(), AttackVisualKind::Stab, 0.0);
+        }
+
+        if hit_any {
+            player.play_sound_holder(weapon.hit_sound());
+        }
+    }
+
     fn stab_attack(
         self: &Arc<Self>,
         target: &SharedEntity,
@@ -379,8 +508,7 @@ impl Player {
         deals_damage: bool,
         deals_knockback: bool,
         dismounts: bool,
-    ) -> bool {
-        let entity = target.as_ref();
+    ) -> bool {        let entity = target.as_ref();
         if self.cannot_attack(entity) {
             return false;
         }

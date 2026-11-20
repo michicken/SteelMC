@@ -32,7 +32,6 @@ use crate::chunk::{
     Chunk,
     block_entity_listener::{FullChunkGameEventListeners, ListenerSelectionCommit},
     chunk_holder::ChunkHolder,
-    data::empty_postprocessing,
     heightmap::{ChunkHeightmaps, HeightmapType},
     light::{
         ChunkLightData, LightSectionEmptinessChange, build_chunk_light_update_packet,
@@ -892,24 +891,14 @@ impl FullChunkRef<'_> {
 
     /// Drains pending vanilla generation postprocessing offsets.
     pub(crate) fn take_postprocessing(&self) -> Option<Box<[Vec<u16>]>> {
-        let mut postprocessing = self.chunk.postprocessing.lock();
-        if postprocessing.iter().all(Vec::is_empty) {
-            return None;
-        }
-
-        let pending = mem::replace(&mut *postprocessing, empty_postprocessing(self.height()));
+        let pending = self.chunk.postprocessing.lock().take()?;
         self.chunk.dirty.store(true, Ordering::Release);
         Some(pending)
     }
 
     /// Snapshots pending postprocessing offsets for chunk persistence.
     pub(crate) fn postprocessing_for_serialization(&self) -> Vec<Vec<u16>> {
-        self.chunk
-            .postprocessing
-            .lock()
-            .iter()
-            .map(Vec::clone)
-            .collect()
+        self.chunk.postprocessing_for_serialization()
     }
 
     /// Runs pending vanilla generation postprocessing at the r1 readiness transition.

@@ -9,7 +9,7 @@ use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
 use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::vanilla_entity_data::MinecartEntityData;
-use steel_registry::{items::ItemRef, vanilla_items};
+use steel_registry::{items::ItemRef, vanilla_entities, vanilla_items};
 use steel_utils::axis::Axis;
 use steel_utils::block_util::FoundRectangle;
 use steel_utils::locks::SyncMutex;
@@ -111,7 +111,22 @@ impl VehicleEntity for MinecartEntity {
     }
 
     fn vehicle_drop_item(&self) -> ItemRef {
-        &vanilla_items::MINECART
+        // The generic minecart implementation backs every minecart variant.
+        // Keep the dropped item matched to the entity type instead of always
+        // returning a plain minecart.
+        if self.entity_type == &vanilla_entities::CHEST_MINECART {
+            &vanilla_items::CHEST_MINECART
+        } else if self.entity_type == &vanilla_entities::FURNACE_MINECART {
+            &vanilla_items::FURNACE_MINECART
+        } else if self.entity_type == &vanilla_entities::TNT_MINECART {
+            &vanilla_items::TNT_MINECART
+        } else if self.entity_type == &vanilla_entities::HOPPER_MINECART {
+            &vanilla_items::HOPPER_MINECART
+        } else if self.entity_type == &vanilla_entities::COMMAND_BLOCK_MINECART {
+            &vanilla_items::COMMAND_BLOCK_MINECART
+        } else {
+            &vanilla_items::MINECART
+        }
     }
 }
 

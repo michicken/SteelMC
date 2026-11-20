@@ -26,10 +26,10 @@ use crate::{
             ATTACK_RANGE, ATTRIBUTE_MODIFIERS, AttackRange, BUNDLE_CONTENTS, CHARGED_PROJECTILES,
             CONTAINER, CUSTOM_DATA, CUSTOM_NAME, DAMAGE, DAMAGE_RESISTANT, DAMAGE_TYPE,
             ENCHANTABLE, ENCHANTMENTS, EQUIPPABLE, Equippable, ITEM_NAME, ItemAttributeModifiers,
-            ItemEnchantments, MAX_DAMAGE, MAX_STACK_SIZE, MINIMUM_ATTACK_CHARGE,
-            OMINOUS_BOTTLE_AMPLIFIER, OminousBottleAmplifier, PIERCING_WEAPON, PiercingWeapon,
-            REPAIRABLE, STORED_ENCHANTMENTS, TOOL, Tool, UNBREAKABLE, WEAPON, WRITTEN_BOOK_CONTENT,
-            Weapon,
+            ItemEnchantments, KINETIC_WEAPON, KineticWeapon, MAX_DAMAGE, MAX_STACK_SIZE,
+            MINIMUM_ATTACK_CHARGE, OMINOUS_BOTTLE_AMPLIFIER, OminousBottleAmplifier,
+            PIERCING_WEAPON, PiercingWeapon, REPAIRABLE, STORED_ENCHANTMENTS, TOOL, Tool,
+            UNBREAKABLE, WEAPON, WRITTEN_BOOK_CONTENT, Weapon,
         },
     },
     enchantment_effect::EnchantmentEffectComponent,
@@ -558,6 +558,12 @@ impl ItemStack {
     #[must_use]
     pub fn get_piercing_weapon(&self) -> Option<&PiercingWeapon> {
         self.get(PIERCING_WEAPON)
+    }
+
+    /// Gets the `KineticWeapon` component if present (spear charge attacks).
+    #[must_use]
+    pub fn get_kinetic_weapon(&self) -> Option<&KineticWeapon> {
+        self.get(KINETIC_WEAPON)
     }
 
     /// Returns the mining speed for the given block state ID.
