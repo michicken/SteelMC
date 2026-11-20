@@ -143,7 +143,12 @@ fn unsupported_spawn_data_delays_and_reselects_without_inserting() {
     root.insert("MaxSpawnDelay", 10_i32);
     root.insert("SpawnCount", 1_i32);
 
-    root.insert("SpawnData", spawn_data("minecraft:zombie").to_nbt());
+    // An id outside the registry hits the unsupported branch before the tick
+    // rolls a random position or collision check, so the outcome is stable.
+    root.insert(
+        "SpawnData",
+        spawn_data("steel_test:not_a_registered_entity").to_nbt(),
+    );
 
     let mut potential = NbtCompound::new();
     potential.insert("data", spawn_data("minecraft:pig").to_nbt());
