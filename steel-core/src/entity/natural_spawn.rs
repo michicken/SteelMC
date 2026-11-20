@@ -41,7 +41,7 @@ pub fn tick_natural_spawns(world: &Arc<World>, attempts_per_player: usize) -> us
     let mut players = Vec::new();
     world.players.iter_players(|_, player| {
         players.push((player.position(), player.id()));
-        false
+        true
     });
     let mut spawned = 0;
     // Include game time in the seed. Previously every tick re-created the
